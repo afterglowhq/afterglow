@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="138.7" height="20" role="img" aria-label="afterglow: 31,038 stars, about 2,217 per day lifetime average (proxy)">
+<title>afterglow: 31,038 stars, about 2,217 per day lifetime average (proxy)</title>
+<clipPath id="r"><rect width="138.7" height="20" rx="3" fill="#fff"/></clipPath>
+<g clip-path="url(#r)">
+<rect width="64.0" height="20" fill="#555555"/>
+<rect x="64.0" width="74.7" height="20" fill="#9f9f9f"/>
+</g>
+<path transform="translate(5,4) scale(0.75)" fill="#eac54f" d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/>
+<g text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="110" text-rendering="geometricPrecision">
+<text aria-hidden="true" x="395" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="390">31,038</text>
+<text x="395" y="140" fill="#fff" transform="scale(.1)" textLength="390">31,038</text>
+<text aria-hidden="true" x="1014" y="150" fill="#ccc" fill-opacity=".3" transform="scale(.1)" textLength="647">~2,217 avg</text>
+<text x="1014" y="140" fill="#24292f" transform="scale(.1)" textLength="647">~2,217 avg</text>
+</g>
+</svg>

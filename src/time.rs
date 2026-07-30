@@ -21,6 +21,29 @@ pub fn iso8601_utc(unix: i64) -> String {
     )
 }
 
+/// Inverse of `iso8601_utc`. Velocity spans need the store's timestamps back as
+/// instants; anything not exactly `YYYY-MM-DDTHH:MM:SSZ` is not ours to guess at.
+pub fn parse_iso8601_utc(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    let shaped = |i: usize, c: u8| match i {
+        4 | 7 => c == b'-',
+        10 => c == b'T',
+        13 | 16 => c == b':',
+        19 => c == b'Z',
+        _ => c.is_ascii_digit(),
+    };
+    if b.len() != 20 || !b.iter().enumerate().all(|(i, &c)| shaped(i, c)) {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| s[r].parse::<i64>().ok();
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    Some(days_from_civil(y, m, d) * SECONDS_PER_DAY + hh * 3600 + mm * 60 + ss)
+}
+
 pub fn date_utc(unix: i64) -> String {
     let (y, m, d) = civil_from_days(unix.div_euclid(SECONDS_PER_DAY));
     format!("{y:04}-{m:02}-{d:02}")
@@ -37,6 +60,17 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// Hinnant's `days_from_civil`, the inverse of the above.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = y - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 #[cfg(test)]
@@ -60,6 +94,44 @@ mod tests {
             date_utc(1_784_206_313 - 180 * SECONDS_PER_DAY),
             "2026-01-17"
         );
+    }
+
+    #[test]
+    fn parses_what_it_formats() {
+        for unix in [
+            0,
+            1,
+            1_784_206_313,
+            1_583_020_800,
+            951_782_400,
+            -1,
+            1_785_369_347,
+        ] {
+            assert_eq!(parse_iso8601_utc(&iso8601_utc(unix)), Some(unix), "{unix}");
+        }
+        assert_eq!(
+            parse_iso8601_utc("2026-07-30T21:55:47Z"),
+            Some(1_785_448_547)
+        );
+    }
+
+    #[test]
+    fn rejects_anything_but_the_one_format() {
+        for s in [
+            "",
+            "2026-07-30",
+            "2026-07-30T21:55:47",
+            "2026-07-30T21:55:47.5Z",
+            "2026-07-30t21:55:47Z",
+            "2026-07-30 21:55:47Z",
+            "2026-13-30T21:55:47Z",
+            "2026-07-32T21:55:47Z",
+            "2026-07-30T24:55:47Z",
+            "2026-07-30T21:60:47Z",
+            "+026-07-30T21:55:47Z",
+        ] {
+            assert_eq!(parse_iso8601_utc(s), None, "{s}");
+        }
     }
 
     #[test]

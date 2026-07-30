@@ -1,9 +1,14 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 
-const MIGRATIONS: &[&str] = &[include_str!("migrations/001-store.sql")];
+use crate::github::Repo;
+
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/001-store.sql"),
+    include_str!("migrations/002-enroll-queue.sql"),
+];
 
 /// `enrolled_at` only ever moves earlier: it is the first sight, and importing
 /// older history is a sighting we did not have before.
@@ -15,11 +20,45 @@ ON CONFLICT (id) DO UPDATE SET
     enrolled_at = MIN(repos.enrolled_at, excluded.enrolled_at),
     created_at  = COALESCE(excluded.created_at, repos.created_at)";
 
+/// `subscribers` is only ever non-null where a per-repo GET happened; the search
+/// sweep passes NULL rather than inventing a count.
 pub const APPEND_SNAPSHOT: &str = "\
-INSERT OR IGNORE INTO snapshots (repo_id, ts, stars, forks, open_issues, pushed_at)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+INSERT OR IGNORE INTO snapshots (repo_id, ts, stars, forks, open_issues, pushed_at, subscribers)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
 pub const REPO_ID_BY_NAME: &str = "SELECT id FROM repos WHERE full_name = ?1 ORDER BY id LIMIT 1";
+
+pub const QUEUE_ENROLLMENT: &str = "\
+INSERT OR IGNORE INTO enroll_queue (full_name, requested_at) VALUES (?1, ?2)";
+
+pub const QUEUED_ENROLLMENTS: &str = "\
+SELECT full_name FROM enroll_queue ORDER BY requested_at, full_name LIMIT ?1";
+
+pub const DEQUEUE_ENROLLMENT: &str = "DELETE FROM enroll_queue WHERE full_name = ?1";
+
+/// Series are retained when a repo goes away; only the badge changes.
+pub const MARK_INACTIVE: &str = "UPDATE repos SET status = 'inactive' WHERE id = ?1";
+
+/// The repo row and the snapshot that a per-repo GET just paid for. `lane` is only
+/// read when the row is new, so a sweep passes the lane the repo already has.
+pub fn record_repo(conn: &Connection, repo: &Repo, lane: &str, ts: &str) -> Result<usize> {
+    conn.execute(
+        UPSERT_REPO,
+        params![repo.id, repo.full_name, lane, ts, repo.created_at],
+    )?;
+    Ok(conn.execute(
+        APPEND_SNAPSHOT,
+        params![
+            repo.id,
+            ts,
+            repo.stargazers_count,
+            repo.forks_count,
+            repo.open_issues_count,
+            repo.pushed_at,
+            repo.subscribers_count,
+        ],
+    )?)
+}
 
 pub struct Store {
     pub conn: Connection,
@@ -45,6 +84,9 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "wal")?;
         conn.pragma_update(None, "synchronous", "normal")?;
         conn.pragma_update(None, "foreign_keys", true)?;
+        // The badge server and the snapshot timer are separate processes on one
+        // db; a write landing mid-transaction should wait, not fail SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let mut store = Store { conn };
         store.migrate()?;
         Ok(store)
@@ -108,7 +150,13 @@ mod tests {
         names.retain(|n: &String| !n.starts_with("sqlite_"));
         assert_eq!(
             names,
-            ["capture_month", "prehistory_monthly", "repos", "snapshots"]
+            [
+                "capture_month",
+                "enroll_queue",
+                "prehistory_monthly",
+                "repos",
+                "snapshots"
+            ]
         );
 
         drop(store);
@@ -119,6 +167,44 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, MIGRATIONS.len() as i64);
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The deployed store is mid-list; later migrations have to land on top of it
+    /// without touching what is already there.
+    #[test]
+    fn migrations_apply_on_top_of_an_older_store() {
+        let path = temp_path("additive");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.execute(
+                "INSERT INTO repos (id, full_name, lane, enrolled_at) VALUES (7, 'a/b', 'scan', '2026-07-30T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let version: i64 = store
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
+        let name: String = store
+            .conn
+            .query_row("SELECT full_name FROM repos WHERE id = 7", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(name, "a/b");
+        store
+            .conn
+            .execute(QUEUE_ENROLLMENT, params!["c/d", "2026-07-31T00:00:00Z"])
+            .unwrap();
+
         drop(store);
         let _ = std::fs::remove_file(&path);
     }

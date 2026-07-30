@@ -13,11 +13,22 @@ const USER_AGENT: &str = "afterglow";
 const MAX_ATTEMPTS: u32 = 6;
 const MAX_BACKOFF: Duration = Duration::from_secs(900);
 
+/// `stargazers_count` carries no default on purpose: a response we cannot read a
+/// star count out of is a decode error, never a snapshot row claiming zero stars.
 #[derive(Debug, Deserialize)]
 pub struct Repo {
     pub id: i64,
     pub full_name: String,
     pub created_at: String,
+    pub stargazers_count: i64,
+    #[serde(default)]
+    pub forks_count: Option<i64>,
+    #[serde(default)]
+    pub open_issues_count: Option<i64>,
+    #[serde(default)]
+    pub subscribers_count: Option<i64>,
+    #[serde(default)]
+    pub pushed_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,22 +53,40 @@ struct SearchPage {
 pub struct GitHub {
     http: Client,
     token: String,
+    base: String,
 }
 
 impl GitHub {
     pub fn from_env() -> Result<Self> {
         let token = std::env::var("GITHUB_TOKEN")
             .context("GITHUB_TOKEN is not set; the GitHub API needs an authenticated identity")?;
-        let http = Client::builder()
+        Ok(GitHub {
+            http: Self::client()?,
+            token,
+            base: API.to_string(),
+        })
+    }
+
+    /// Points the client at a local stub so tests exercise the real request path.
+    #[cfg(test)]
+    pub fn at(base: &str) -> Self {
+        GitHub {
+            http: Self::client().expect("building the test client"),
+            token: "test-token".to_string(),
+            base: base.trim_end_matches('/').to_string(),
+        }
+    }
+
+    fn client() -> Result<Client> {
+        Ok(Client::builder()
             .user_agent(USER_AGENT)
             .timeout(Duration::from_secs(60))
-            .build()?;
-        Ok(GitHub { http, token })
+            .build()?)
     }
 
     /// `None` means the repo is gone from our vantage point: deleted, renamed, or private.
     pub fn repo(&self, full_name: &str) -> Result<Option<Repo>> {
-        let url = format!("{API}/repos/{full_name}");
+        let url = format!("{}/repos/{full_name}", self.base);
         match self.get(&url, &[])? {
             Some(resp) => Ok(Some(
                 resp.json().with_context(|| format!("decoding {url}"))?,
@@ -67,7 +96,7 @@ impl GitHub {
     }
 
     pub fn search_repositories(&self, query: &str, page: u32) -> Result<Vec<SearchItem>> {
-        let url = format!("{API}/search/repositories");
+        let url = format!("{}/search/repositories", self.base);
         let params = [
             ("q", query.to_string()),
             ("sort", "stars".to_string()),
@@ -145,6 +174,53 @@ fn backoff(status: StatusCode, headers: &HeaderMap, attempt: u32, now: i64) -> O
     None
 }
 
+/// A canned GitHub: one response per connection, in order. When the list runs out
+/// the port closes, which is how a test proves no further call was made.
+#[cfg(test)]
+pub fn stub(
+    responses: Vec<(u16, String)>,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binding the stub");
+    let base = format!("http://{}", listener.local_addr().expect("stub address"));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    std::thread::spawn(move || {
+        let mut canned = responses.into_iter();
+        while let Ok((mut sock, _)) = listener.accept() {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") && matches!(sock.read(&mut byte), Ok(1)) {
+                request.push(byte[0]);
+            }
+            let Some((status, body)) = canned.next() else {
+                // Out of responses: hang up, so an unexpected call fails at once
+                // instead of hanging the test on a timeout.
+                let _ = sock.shutdown(std::net::Shutdown::Both);
+                continue;
+            };
+            let _ = write!(
+                sock,
+                "HTTP/1.1 {status} stub\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (base, hits)
+}
+
+#[cfg(test)]
+pub fn repo_json(id: i64, full_name: &str, stars: i64, created_at: &str) -> String {
+    format!(
+        r#"{{"id":{id},"full_name":"{full_name}","created_at":"{created_at}","stargazers_count":{stars},"forks_count":3,"open_issues_count":4,"subscribers_count":5,"pushed_at":"{created_at}"}}"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +273,24 @@ mod tests {
         assert!(backoff(StatusCode::BAD_GATEWAY, &HeaderMap::new(), 1, 0).is_some());
         assert!(backoff(StatusCode::UNAUTHORIZED, &HeaderMap::new(), 1, 0).is_none());
         assert!(backoff(StatusCode::UNPROCESSABLE_ENTITY, &HeaderMap::new(), 1, 0).is_none());
+    }
+
+    #[test]
+    fn the_stub_speaks_enough_http_for_the_real_client() {
+        let (base, hits) = stub(vec![
+            (200, repo_json(9, "a/b", 12, "2026-01-02T03:04:05Z")),
+            (404, "{}".to_string()),
+        ]);
+        let gh = GitHub::at(&base);
+
+        let repo = gh.repo("a/b").unwrap().expect("a body");
+        assert_eq!((repo.id, repo.stargazers_count), (9, 12));
+        assert_eq!(repo.subscribers_count, Some(5));
+        assert_eq!(repo.pushed_at.as_deref(), Some("2026-01-02T03:04:05Z"));
+        assert!(gh.repo("a/b").unwrap().is_none());
+        // Out of canned responses: the call is seen and then refused, never hung.
+        assert!(gh.repo("a/b").is_err());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[test]

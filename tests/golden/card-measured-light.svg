@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="420" height="150" role="img" aria-label="afterglow: JuliusBrussee/caveman — 94,590 stars, gaining 807 per day, top 0.4% velocity">
+<title>afterglow: JuliusBrussee/caveman — 94,590 stars, gaining 807 per day, top 0.4% velocity</title>
+<rect x=".5" y=".5" width="419" height="149" rx="6" fill="#ffffff" stroke="#d0d7de"/>
+<g font-family="Helvetica,Arial,sans-serif">
+<text x="16" y="27" font-size="13" font-weight="600" fill="#0969da">JuliusBrussee/caveman</text>
+<path transform="translate(16,41)" fill="#eac54f" d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/>
+<text x="38" y="56" font-size="20" font-weight="600" fill="#1f2328">94,590</text>
+<text x="111.2" y="56" font-size="13" font-weight="600" fill="#1a7f37">▲ 807/day</text>
+<text x="16" y="74" font-size="11" fill="#59636e">top 0.4% velocity · all tracked repos</text>
+<defs><linearGradient id="glow-card-measured-light" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#d4a72c" stop-opacity=".3"/><stop offset="1" stop-color="#d4a72c" stop-opacity="0"/>
+</linearGradient></defs>
+<path d="M16,118 L29,117 L43,117 L56,116 L70,115 L83,115 L96,114 L110,113 L123,113 L137,112 L150,111 L163,110 L177,109 L190,109 L203,108 L217,107 L230,105 L244,104 L257,103 L270,102 L284,100 L297,99 L310,97 L324,96 L337,94 L350,93 L364,91 L377,90 L391,88 L404,87 L404,122 L16,122 Z" fill="url(#glow-card-measured-light)"/>
+<polyline points="16,118 29,117 43,117 56,116 70,115 83,115 96,114 110,113 123,113 137,112 150,111 163,110 177,109 190,109 203,108 217,107 230,105 244,104 257,103 270,102 284,100 297,99 310,97 324,96 337,94 350,93 364,91 377,90 391,88 404,87" fill="none" stroke="#d4a72c" stroke-width="1.5"/>
+<text x="16" y="140" font-size="10.5" font-weight="400" fill="#59636e">last 30 days · tracked since 2026-07-30</text>
+<text x="404" y="140" font-size="10.5" text-anchor="end" fill="#59636e">afterglow</text>
+</g>
+</svg>

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="420" height="150" role="img" aria-label="afterglow: JuliusBrussee/caveman — 94,590 stars, measuring, first reading tomorrow">
+<title>afterglow: JuliusBrussee/caveman — 94,590 stars, measuring, first reading tomorrow</title>
+<rect x=".5" y=".5" width="419" height="149" rx="6" fill="#ffffff" stroke="#d0d7de"/>
+<g font-family="Helvetica,Arial,sans-serif">
+<text x="16" y="27" font-size="13" font-weight="600" fill="#0969da">JuliusBrussee/caveman</text>
+<path transform="translate(16,41)" fill="#eac54f" d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/>
+<text x="38" y="56" font-size="20" font-weight="600" fill="#1f2328">94,590</text>
+<text x="111.2" y="56" font-size="13" font-weight="400" fill="#59636e">measuring · first reading tomorrow</text>
+
+<line x1="16" y1="112" x2="404" y2="112" stroke="#59636e" stroke-width="1" stroke-dasharray="3,5" opacity=".6"/>
+<text x="16" y="140" font-size="10.5" font-weight="400" fill="#59636e">tracked since 2026-07-30</text>
+<text x="404" y="140" font-size="10.5" text-anchor="end" fill="#59636e">afterglow</text>
+</g>
+</svg>

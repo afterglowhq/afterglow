@@ -213,6 +213,7 @@ pub fn run_tsv(store: &mut Store, path: &Path) -> Result<()> {
                 row.forks,
                 row.open_issues,
                 row.pushed_at,
+                None::<i64>,
             ])?;
         }
     }

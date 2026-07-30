@@ -1,13 +1,17 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod badge;
 mod github;
 mod import;
+mod serve;
 mod snapshot;
 mod store;
 mod time;
+mod widths;
 
 use github::GitHub;
 use store::Store;
@@ -32,7 +36,32 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Serve badges and rankings
-    Serve,
+    Serve {
+        /// Address to bind
+        #[arg(
+            long,
+            env = "AFTERGLOW_LISTEN",
+            default_value = "127.0.0.1:8080",
+            value_name = "ADDR"
+        )]
+        listen: SocketAddr,
+        /// PEM certificate chain; without the pair, plain HTTP for a proxy to front
+        #[arg(
+            long,
+            env = "AFTERGLOW_TLS_CERT",
+            requires = "tls_key",
+            value_name = "PATH"
+        )]
+        tls_cert: Option<PathBuf>,
+        /// PEM private key for --tls-cert
+        #[arg(
+            long,
+            env = "AFTERGLOW_TLS_KEY",
+            requires = "tls_cert",
+            value_name = "PATH"
+        )]
+        tls_key: Option<PathBuf>,
+    },
     /// Snapshot the tracked set
     Snapshot,
     /// Bring existing history into the store
@@ -68,7 +97,11 @@ pub fn plural(n: usize, noun: &str) -> String {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Serve => anyhow::bail!("serve is not implemented yet"),
+        Command::Serve {
+            listen,
+            tls_cert,
+            tls_key,
+        } => serve::run(&cli.db, listen, tls_cert.zip(tls_key)),
         Command::Snapshot => {
             let gh = GitHub::from_env()?;
             snapshot::run(&mut Store::open(&cli.db)?, &gh)
