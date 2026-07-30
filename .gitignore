@@ -1,0 +1,17 @@
+# Snapshot data: the series lives on the host and its replica, never in a repo
+data/
+
+# Rust build output
+target/
+
+# Transitional Python collector, runs from launchd outside the repo, retires late August 2026
+snapshot.py
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+.DS_Store

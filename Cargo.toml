@@ -1,0 +1,10 @@
+[package]
+name = "afterglow"
+version = "0.1.0"
+edition = "2024"
+description = "GitHub star telemetry: daily snapshots, measured velocity"
+license-file = "LICENSE.md"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
