@@ -246,23 +246,29 @@ pub fn not_tracked_card(full_name: &str, theme: Theme) -> String {
 
 /// Direction changes the glyph, never the colour: measured is measured.
 ///
-/// This and the three formatters under it are the only place a displayed number
-/// becomes text. The leaderboard calls them too, so a row and a card cannot
-/// disagree by a rounding step about the same repo.
+/// This and the formatters under it are the only place a displayed number becomes
+/// text. The leaderboard calls them too, so a row and a card cannot disagree by a
+/// rounding step about the same repo.
 pub fn delta(v: i64) -> String {
-    format!(
-        "{} {}/day",
-        if v < 0 { "▼" } else { "▲" },
-        commas(v.saturating_abs())
-    )
+    format!("{} {}", arrow(v), rate(v))
+}
+
+/// A delta in parts. The leaderboard draws the glyph and speaks the word, and both
+/// answer to this one test, so the row a screen reader hears is the row on screen.
+pub fn arrow(v: i64) -> &'static str {
+    if v < 0 { "▼" } else { "▲" }
+}
+
+pub fn direction(v: i64) -> &'static str {
+    if v < 0 { "losing" } else { "gaining" }
+}
+
+pub fn rate(v: i64) -> String {
+    format!("{}/day", commas(v.saturating_abs()))
 }
 
 fn gain_phrase(v: i64) -> String {
-    format!(
-        "{} {} per day",
-        if v < 0 { "losing" } else { "gaining" },
-        commas(v.saturating_abs())
-    )
+    format!("{} {} per day", direction(v), commas(v.saturating_abs()))
 }
 
 /// The lifetime average, wearing the mark that says it was never measured.

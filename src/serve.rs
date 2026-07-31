@@ -246,12 +246,37 @@ enum Shape {
     Card(Theme),
 }
 
+/// Velocity is what the page claims, so it stays the default order. Stars is the
+/// same rows in another order, carrying the same numbers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Sort {
+    Velocity,
+    Stars,
+}
+
 async fn index(State(state): State<Arc<AppState>>) -> Response {
     html(site::index(&load_board(&state).await), PAGE_CACHE)
 }
 
-async fn rankings(State(state): State<Arc<AppState>>) -> Response {
-    html(site::rankings(&load_board(&state).await), PAGE_CACHE)
+async fn rankings(
+    State(state): State<Arc<AppState>>,
+    query: Result<Query<HashMap<String, String>>, QueryRejection>,
+) -> Response {
+    let q = query.map(|Query(q)| q).unwrap_or_default();
+    // An unreadable sort is the default board, the way an unreadable style is the pill.
+    let sort = match q.get("sort").map(String::as_str) {
+        Some("stars") => Sort::Stars,
+        _ => Sort::Velocity,
+    };
+    let mut board = load_board(&state).await;
+    if sort == Sort::Stars {
+        board.rows.sort_by(|a, b| {
+            b.stars
+                .cmp(&a.stars)
+                .then_with(|| a.full_name.cmp(&b.full_name))
+        });
+    }
+    html(site::rankings(&board, sort), PAGE_CACHE)
 }
 
 /// The form's own answer, about one submission: never cached, never shared.
@@ -1112,6 +1137,34 @@ mod tests {
         h.snapshot(id, 1, 1_100);
     }
 
+    /// The column headers on their own. The nav links to `/rankings` too, and a
+    /// test about the head strip must not be answered by the masthead.
+    fn head_strip(page: &str) -> &str {
+        page.split(r#"<div class="row head">"#)
+            .nth(1)
+            .and_then(|rest| rest.split("</div>").next())
+            .expect("the board prints a head strip")
+    }
+
+    /// One repo's row, wherever the page put it.
+    fn row_of<'a>(page: &'a str, name: &str) -> &'a str {
+        page.split(r#"<li class="row">"#)
+            .filter_map(|piece| piece.split("</li>").next())
+            .find(|row| row.contains(&format!(">{name}</a>")))
+            .unwrap_or_else(|| panic!("the board prints a row for {name}"))
+    }
+
+    /// The number the percentile cell shows, stopping at the sr-only span that
+    /// says what it is a percentile of.
+    fn percentile_of_row(page: &str, name: &str) -> String {
+        row_of(page, name)
+            .split("top ")
+            .nth(1)
+            .and_then(|rest| rest.split('<').next())
+            .unwrap_or_else(|| panic!("{name} states a percentile"))
+            .to_string()
+    }
+
     #[test]
     fn style_defaults_to_the_pill_and_theme_only_moves_the_card() {
         let h = harness(vec![]);
@@ -1395,10 +1448,15 @@ mod tests {
         // Byte for byte the card's percentile, from the same pool and the same
         // rounding, which is the whole reason the page exists.
         assert!(
-            board.contains(&format!("top {percentile}</span>")),
+            board.contains(&format!(
+                r#"<span class="c-pct num">top {percentile}<span class="sr-only"> velocity</span></span>"#
+            )),
             "{board}"
         );
-        assert!(board.contains(">▲ 300/day</span>"), "{board}");
+        assert!(
+            board.contains(r#"aria-hidden="true">▲ </span>300/day"#),
+            "{board}"
+        );
         // Ranked by the number, fastest first.
         let rank = |name: &str| board.find(name).expect(name);
         assert!(rank("o/r1") < rank("o/r2"));
@@ -1435,10 +1493,112 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("c-repo").next())
             .expect("the board prints the row");
-        assert!(row.contains(&format!("top {percentile}</span>")), "{row}");
+        assert!(
+            row.contains(&format!(
+                r#"top {percentile}<span class="sr-only"> velocity</span>"#
+            )),
+            "{row}"
+        );
         // The slowest repo of all is down there too.
         assert!(board.contains(">o/r130</a>"), "{board}");
         assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
+    fn stars_is_the_same_board_in_another_order() {
+        let h = harness(vec![]);
+        // Stars and velocity disagree row for row here, so an order is tellable.
+        for (id, name, count, per_day) in [
+            (1, "o/steady", 9_000, 100),
+            (2, "o/big", 5_000, 200),
+            (3, "o/rocket", 1_000, 400),
+        ] {
+            h.track(id, name, 24 * 30, None);
+            h.snapshot(id, 24, count - per_day);
+            h.snapshot(id, 0, count);
+        }
+        let names = ["o/steady", "o/big", "o/rocket"];
+        let order = |page: &str| {
+            let mut seen = names;
+            seen.sort_by_key(|n| page.find(&format!(">{n}</a>")).expect(n));
+            seen
+        };
+
+        let velocity = h.get("/rankings");
+        let stars = h.get("/rankings?sort=stars");
+        assert_eq!(stars.status, StatusCode::OK);
+        // Two URLs, one page, each cacheable on its own.
+        assert_eq!(stars.cache_control, "public, max-age=300");
+        assert_eq!(order(&velocity.body), ["o/rocket", "o/big", "o/steady"]);
+        assert_eq!(order(&stars.body), ["o/steady", "o/big", "o/rocket"]);
+
+        // Anything but the exact value is the default board, and unknown params
+        // are ignored the way the badge URLs ignore them.
+        for uri in ["/rankings?sort=STARS", "/rankings?sort=", "/rankings?x=1"] {
+            assert_eq!(order(&h.get(uri).body), order(&velocity.body), "{uri}");
+        }
+
+        // The percentile still means velocity in the stars view, row for row.
+        for name in names {
+            assert_eq!(
+                percentile_of_row(&velocity.body, name),
+                percentile_of_row(&stars.body, name),
+                "{name}"
+            );
+            assert_eq!(row_of(&velocity.body, name), row_of(&stars.body, name));
+        }
+        assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
+    fn the_head_strip_is_the_way_to_the_other_order() {
+        let h = harness(vec![]);
+        measured(&h, 1, "o/r");
+        let default = h.get("/rankings").body;
+        let stars = h.get("/rankings?sort=stars").body;
+
+        let head = head_strip(&default);
+        assert!(
+            head.contains(r#"<a href="/rankings?sort=stars" aria-label="sort by stars">stars</a>"#),
+            "{head}"
+        );
+        // The order in force is not a link to itself.
+        assert!(!head.contains(">velocity</a>"), "{head}");
+
+        let head = head_strip(&stars);
+        assert!(
+            head.contains(r#"<a href="/rankings" aria-label="sort by velocity">velocity</a>"#),
+            "{head}"
+        );
+        assert!(!head.contains(">stars</a>"), "{head}");
+
+        // The rank column is a CSS counter, so its header exists only to be read
+        // aloud, and it stays a grid item so the columns do not shift.
+        for head in [head_strip(&default), head_strip(&stars)] {
+            assert!(
+                head.starts_with(r#"<span><span class="sr-only">rank</span></span>"#),
+                "{head}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_nav_says_where_we_are_and_the_wordmark_only_goes_home() {
+        let h = harness(vec![]);
+        measured(&h, 1, "o/r");
+
+        let home = r#"<a href="/" aria-current="page">home</a><a href="/rankings">rankings</a>"#;
+        let board = r#"<a href="/">home</a><a href="/rankings" aria-current="page">rankings</a>"#;
+        for (uri, nav) in [
+            ("/", home),
+            ("/rankings", board),
+            ("/rankings?sort=stars", board),
+        ] {
+            let page = h.get(uri).body;
+            assert!(page.contains(&format!("<nav>{nav}</nav>")), "{uri}: {page}");
+            // The wordmark is the way home and says nothing about where we are.
+            assert!(page.contains(r#"<a class="wordmark" href="/">"#), "{uri}");
+        }
     }
 
     #[test]
@@ -1457,11 +1617,15 @@ mod tests {
 
         let board = h.get("/rankings").body;
         assert!(
-            board.contains(r#"<span class="num drop">▼ 100/day</span>"#),
+            board.contains(
+                r#"<span class="num drop"><span class="sr-only">losing </span><span aria-hidden="true">▼ </span>100/day</span>"#
+            ),
             "{board}"
         );
         assert!(
-            board.contains(r#"<span class="num gain">▲ 100/day</span>"#),
+            board.contains(
+                r#"<span class="num gain"><span class="sr-only">gaining </span><span aria-hidden="true">▲ </span>100/day</span>"#
+            ),
             "{board}"
         );
         // Proxy rows interleave on their number, muted, with no percentile and no
@@ -1471,6 +1635,45 @@ mod tests {
             "{board}"
         );
         assert!(!board.contains("o/quiet"), "{board}");
+    }
+
+    #[test]
+    fn a_measured_row_says_out_loud_what_the_layout_shows() {
+        let h = harness(vec![]);
+        measured(&h, 1, "o/rising");
+        // Young, one reading: the proxy cell already says "avg" in its own text.
+        h.track(2, "o/young", 24, Some(24 * 10));
+        h.snapshot(2, 1, 300);
+
+        let board = h.get("/rankings").body;
+        let row = row_of(&board, "o/rising");
+        // The count is naked without this: the star is an octicon and aria-hidden.
+        assert!(
+            row.contains(r#"1,100<span class="sr-only"> stars</span>"#),
+            "{row}"
+        );
+        // The glyph is decoration and the word is what carries it, so the row a
+        // screen reader hears is "gaining 100/day", the phrase the pill uses.
+        assert!(
+            row.contains(
+                r#"<span class="sr-only">gaining </span><span aria-hidden="true">▲ </span>100/day"#
+            ),
+            "{row}"
+        );
+        // The percentile is the same claim the card's line makes, so it names the
+        // number it is a percentile of.
+        assert!(
+            row.contains(r#"top 100%<span class="sr-only"> velocity</span>"#),
+            "{row}"
+        );
+
+        // A proxy row reads as it always did, glyphless and unranked.
+        let young = row_of(&board, "o/young");
+        assert!(
+            young.contains(r#"<span class="num proxy">~30 avg</span>"#),
+            "{young}"
+        );
+        assert!(!young.contains("gaining"), "{young}");
     }
 
     #[test]

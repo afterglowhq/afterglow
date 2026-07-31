@@ -8,7 +8,7 @@ use maud::{DOCTYPE, Markup, PreEscaped, html};
 
 use crate::badge::{self, STAR};
 use crate::serve::{
-    Board, BoardRow, FONT_URL, MINI_SPARK, MINI_SPARK_HEIGHT, Outcome, RowVelocity,
+    Board, BoardRow, FONT_URL, MINI_SPARK, MINI_SPARK_HEIGHT, Outcome, RowVelocity, Sort,
 };
 
 const HOST: &str = "https://afterglow.watch";
@@ -18,6 +18,10 @@ const DESCRIPTION: &str = "Daily star snapshots for GitHub repos: a README badge
 
 /// Mona Sans carries the display type and nothing else; body text is the reader's
 /// own system stack, which is already the voice of every page they read code on.
+///
+/// The form's two controls take --muted for a border where everything else takes
+/// --border. A control is an edge somebody has to find, and --border is a rule
+/// between rows: quiet enough to sit under text, too quiet to be a boundary.
 const CSS: &str = r#"
 @font-face {
   font-family: "Mona Sans";
@@ -68,6 +72,17 @@ p { margin: 0 0 12px; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .lede { color: var(--muted); font-size: 1.0625rem; margin-bottom: 24px; }
 .note { color: var(--muted); font-size: 0.875rem; }
 code { font-family: var(--mono); font-size: 0.875em; }
@@ -91,6 +106,7 @@ pre {
   border-bottom: 1px solid var(--border);
 }
 .wordmark { font-size: 1.125rem; color: var(--fg); }
+nav { display: flex; gap: 16px; }
 .mark { height: 1.25rem; width: auto; margin-right: 8px; vertical-align: -0.3em; }
 .mark .line { fill: none; stroke: var(--spark); stroke-width: 22; stroke-linecap: round; stroke-linejoin: round; }
 .mark .glyph { fill: var(--gold); }
@@ -108,6 +124,7 @@ stop { stop-color: var(--spark); }
   font-size: 0.75rem;
   letter-spacing: 0.04em;
 }
+.head a { color: inherit; }
 .board { list-style: none; margin: 0; padding: 0; counter-reset: rank; }
 .board li { counter-increment: rank; padding: 10px 0; border-top: 1px solid var(--border); }
 .board li::before {
@@ -131,7 +148,7 @@ input[type="text"] {
   flex: 1 1 18rem;
   min-width: 0;
   padding: 8px 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--muted);
   border-radius: 6px;
   background: var(--canvas);
   color: var(--fg);
@@ -140,7 +157,7 @@ input[type="text"] {
 }
 button {
   padding: 8px 16px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--muted);
   border-radius: 6px;
   background: var(--canvas-subtle);
   color: var(--fg);
@@ -149,7 +166,7 @@ button {
   font-weight: 600;
   cursor: pointer;
 }
-button:hover { border-color: var(--muted); }
+button:hover { border-color: var(--fg); }
 .examples { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 16px; margin: 16px 0; }
 .examples img { max-width: 100%; height: auto; }
 .attribution {
@@ -268,7 +285,7 @@ pub fn index(board: &Board) -> Markup {
     shell("Afterglow", "/", body, board.through.as_deref())
 }
 
-pub fn rankings(board: &Board) -> Markup {
+pub fn rankings(board: &Board, sort: Sort) -> Markup {
     let body = html! {
         h1 { "Velocity" }
         p.lede {
@@ -282,12 +299,31 @@ pub fn rankings(board: &Board) -> Markup {
                 "so the board fills in as the fleet reports."
             }
         } @else {
+            // The other ordering is the same board, so the way to it is the header
+            // of the column it sorts on. The one in force is not a link to itself.
             .row.head {
-                span {}
+                // The rank column is drawn by a CSS counter, so its header has
+                // nothing to show and everything to say. The span stays a grid
+                // item, because an sr-only one would leave the column.
+                span { span.sr-only { "rank" } }
                 span.c-repo { "repo" }
                 span.c-spark { "30 days" }
-                span.c-stars.num { "stars" }
-                span.num { "velocity" }
+                span.c-stars.num {
+                    @match sort {
+                        Sort::Velocity => {
+                            a href="/rankings?sort=stars" aria-label="sort by stars" { "stars" }
+                        }
+                        Sort::Stars => { "stars" }
+                    }
+                }
+                span.num {
+                    @match sort {
+                        Sort::Velocity => { "velocity" }
+                        Sort::Stars => {
+                            a href="/rankings" aria-label="sort by velocity" { "velocity" }
+                        }
+                    }
+                }
                 span.c-pct.num { "percentile" }
             }
             ol.board {
@@ -376,8 +412,13 @@ fn shell(title: &str, here: &str, body: Markup, through: Option<&str>) -> Markup
                 (sprite())
                 .page {
                     header.masthead {
-                        a.wordmark href="/" aria-current=[current("/")] { (mark()) "afterglow" }
-                        nav { a href="/rankings" aria-current=[current("/rankings")] { "rankings" } }
+                        // The nav says where we are. The wordmark is the way home and
+                        // nothing else, or the page announces itself twice.
+                        a.wordmark href="/" { (mark()) "afterglow" }
+                        nav {
+                            a href="/" aria-current=[current("/")] { "home" }
+                            a href="/rankings" aria-current=[current("/rankings")] { "rankings" }
+                        }
                     }
                     main { (body) }
                     (attribution(through))
@@ -419,21 +460,32 @@ fn board_row(row: &BoardRow) -> Markup {
     html! {
         a.c-repo href=(format!("https://github.com/{}", row.full_name)) { (row.full_name) }
         (minispark(&row.spark))
+        // Every unit on the row is drawn as a glyph or a column header, which a
+        // screen reader reading one cell has neither of. The sr-only words are
+        // what the eye already gets from the layout.
         span.c-stars.num {
             svg.star aria-hidden="true" viewBox="0 0 16 16" { use href="#star" {} }
             (badge::commas(row.stars))
+            span.sr-only { " stars" }
         }
         @match row.velocity {
             // Green is the mark of measured gain. A decline is a plain foreground
             // fact, and a proxy average never glows at all.
             RowVelocity::Measured { per_day, .. } => {
-                span.num.gain[per_day >= 0].drop[per_day < 0] { (badge::delta(per_day)) }
+                span.num.gain[per_day >= 0].drop[per_day < 0] {
+                    span.sr-only { (badge::direction(per_day)) " " }
+                    span aria-hidden="true" { (badge::arrow(per_day)) " " }
+                    (badge::rate(per_day))
+                }
             }
             RowVelocity::Proxy { avg } => span.num.proxy { (badge::proxy_avg(avg)) }
         }
         @match row.velocity {
             RowVelocity::Measured { top_percent, .. } => {
-                span.c-pct.num { "top " (badge::percent(top_percent)) "%" }
+                span.c-pct.num {
+                    "top " (badge::percent(top_percent)) "%"
+                    span.sr-only { " velocity" }
+                }
             }
             RowVelocity::Proxy { .. } => span.c-pct {}
         }
