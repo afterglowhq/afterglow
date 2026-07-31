@@ -260,7 +260,7 @@ pub fn index(board: &Board) -> Markup {
             "If your repo is mostly Markdown, a skills collection say, GitHub files it under "
             "whatever scripts it finds, or under nothing. "
             code { "*.md linguist-detectable" } " in " code { ".gitattributes" }
-            " fixes the label, on your repo page and on our rankings both."
+            " fixes the label, on your repo page and on our rankings."
         }
 
         h2 { "Track a repo" }
