@@ -83,6 +83,19 @@ const FONT_CACHE: &str = "public, max-age=31536000, immutable";
 const MONA_SANS: &[u8] = include_bytes!("../static/mona-sans.woff2");
 pub const FONT_URL: &str = "/static/mona-sans.woff2";
 
+/// The identity mark, as the tab icon. Straight from assets/ rather than a copy
+/// under static/, so the favicon cannot drift from the avatar it is. The mark
+/// carries its own dark canvas, so one render answers both themes.
+const ICON_SVG: &[u8] = include_bytes!("../assets/afterglow-avatar.svg");
+const ICON_PNG: &[u8] = include_bytes!("../assets/afterglow-avatar-96.png");
+const TOUCH_ICON: &[u8] = include_bytes!("../assets/afterglow-avatar-512.png");
+/// Served under /static/, which is the prefix the edge cache rule covers.
+pub const ICON_SVG_URL: &str = "/static/favicon.svg";
+pub const ICON_PNG_URL: &str = "/static/favicon-96.png";
+pub const TOUCH_ICON_URL: &str = "/static/apple-touch-icon.png";
+/// A tab icon moves when the brand does, which is not on any schedule.
+const ICON_CACHE: &str = "public, max-age=86400";
+
 const NOT_FOUND: &str = "Nothing here. Badges are at /badge/{owner}/{repo}.\n";
 
 /// Badge URLs carry whatever case a README author typed.
@@ -236,6 +249,15 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/badge/{owner}/{repo}", get(canonical_badge))
         .route("/svg", get(compat_badge))
         .route(FONT_URL, get(font))
+        .route(
+            ICON_SVG_URL,
+            get(|| async { icon(ICON_SVG, "image/svg+xml") }),
+        )
+        .route(ICON_PNG_URL, get(|| async { icon(ICON_PNG, "image/png") }))
+        .route(
+            TOUCH_ICON_URL,
+            get(|| async { icon(TOUCH_ICON, "image/png") }),
+        )
         .fallback(missing)
         .with_state(state)
 }
@@ -306,6 +328,17 @@ async fn font() -> Response {
             (header::CACHE_CONTROL, HeaderValue::from_static(FONT_CACHE)),
         ],
         MONA_SANS,
+    )
+        .into_response()
+}
+
+fn icon(bytes: &'static [u8], mime: &'static str) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static(mime)),
+            (header::CACHE_CONTROL, HeaderValue::from_static(ICON_CACHE)),
+        ],
+        bytes,
     )
         .into_response()
 }
@@ -1424,6 +1457,58 @@ mod tests {
         let missing = h.get("/favicon.ico");
         assert_eq!(missing.status, StatusCode::NOT_FOUND);
         assert_eq!(missing.content_type, "text/plain; charset=utf-8");
+        assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
+    fn the_mark_is_the_tab_icon_and_the_footer_says_where_we_are() {
+        let h = harness(vec![]);
+        measured(&h, 1, "o/r");
+
+        for (uri, mime, bytes) in [
+            (ICON_SVG_URL, "image/svg+xml", ICON_SVG),
+            (ICON_PNG_URL, "image/png", ICON_PNG),
+            (TOUCH_ICON_URL, "image/png", TOUCH_ICON),
+        ] {
+            let icon = h.get(uri);
+            assert_eq!(icon.status, StatusCode::OK, "{uri}");
+            assert_eq!(icon.content_type, mime, "{uri}");
+            assert_eq!(icon.cache_control, "public, max-age=86400", "{uri}");
+            // The bytes out of assets/, so the tab cannot show a stale mark.
+            assert_eq!(icon.bytes, bytes, "{uri}");
+            // Under /static/, which is what the edge cache rule matches on.
+            assert!(uri.starts_with("/static/"), "{uri}");
+        }
+
+        for uri in ["/", "/rankings"] {
+            let page = h.get(uri).body;
+            // Safari ignores an SVG favicon, so the PNG is not a nicety.
+            assert!(
+                page.contains(
+                    r#"<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">"#
+                ),
+                "{uri}: {page}"
+            );
+            assert!(
+                page.contains(
+                    r#"<link rel="icon" type="image/png" sizes="96x96" href="/static/favicon-96.png">"#
+                ),
+                "{uri}: {page}"
+            );
+            assert!(
+                page.contains(
+                    r#"<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">"#
+                ),
+                "{uri}: {page}"
+            );
+            // The footer is drawn by the shell, so both pages carry it.
+            assert!(
+                page.contains(
+                    r#"<a href="https://x.com/afterglowwatch">@afterglowwatch on X</a> · <a href="https://bsky.app/profile/afterglow.watch">@afterglow.watch on Bluesky</a>"#
+                ),
+                "{uri}: {page}"
+            );
+        }
         assert_eq!(h.calls(), 0);
     }
 

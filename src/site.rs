@@ -8,7 +8,8 @@ use maud::{DOCTYPE, Markup, PreEscaped, html};
 
 use crate::badge::{self, STAR};
 use crate::serve::{
-    Board, BoardRow, FONT_URL, MINI_SPARK, MINI_SPARK_HEIGHT, Outcome, RowVelocity, Sort,
+    Board, BoardRow, FONT_URL, ICON_PNG_URL, ICON_SVG_URL, MINI_SPARK, MINI_SPARK_HEIGHT, Outcome,
+    RowVelocity, Sort, TOUCH_ICON_URL,
 };
 
 const HOST: &str = "https://afterglow.watch";
@@ -177,6 +178,7 @@ button:hover { border-color: var(--fg); }
   font-size: 0.8125rem;
 }
 .attribution p { margin: 0 0 4px; }
+.attribution a { color: inherit; }
 @media (max-width: 40rem) {
   h1 { font-size: 1.625rem; }
   .row { grid-template-columns: 1.75rem minmax(0, 1fr) 4.75rem 6.25rem; gap: 8px; }
@@ -406,6 +408,10 @@ fn shell(title: &str, here: &str, body: Markup, through: Option<&str>) -> Markup
                 title { (title) }
                 meta name="description" content=(DESCRIPTION);
                 link rel="preload" href=(FONT_URL) as="font" type="font/woff2" crossorigin;
+                // Safari ignores an SVG favicon, so the PNG is the one it uses.
+                link rel="icon" type="image/svg+xml" href=(ICON_SVG_URL);
+                link rel="icon" type="image/png" sizes="96x96" href=(ICON_PNG_URL);
+                link rel="apple-touch-icon" href=(TOUCH_ICON_URL);
                 style { (PreEscaped(CSS)) }
             }
             body {
@@ -530,6 +536,11 @@ fn attribution(through: Option<&str>) -> Markup {
                 }
             }
             p { "Afterglow is an independent project and is not affiliated with GitHub." }
+            p {
+                a href="https://x.com/afterglowwatch" { "@afterglowwatch on X" }
+                " · "
+                a href="https://bsky.app/profile/afterglow.watch" { "@afterglow.watch on Bluesky" }
+            }
         }
     }
 }
