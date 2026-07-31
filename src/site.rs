@@ -14,6 +14,7 @@ use crate::serve::{
 
 const HOST: &str = "https://afterglow.watch";
 const CONTACT: &str = "hello@afterglow.watch";
+const SOURCE_REPO: &str = "https://github.com/afterglowhq/afterglow";
 const DESCRIPTION: &str = "Daily star snapshots for GitHub repos: a README badge with measured velocity, \
      and a public leaderboard.";
 
@@ -537,6 +538,8 @@ fn attribution(through: Option<&str>) -> Markup {
             }
             p { "Afterglow is an independent project and is not affiliated with GitHub." }
             p {
+                a href=(SOURCE_REPO) { "source on GitHub" }
+                " · "
                 a href="https://x.com/afterglowwatch" { "@afterglowwatch on X" }
                 " · "
                 a href="https://bsky.app/profile/afterglow.watch" { "@afterglow.watch on Bluesky" }

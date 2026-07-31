@@ -1504,7 +1504,7 @@ mod tests {
             // The footer is drawn by the shell, so both pages carry it.
             assert!(
                 page.contains(
-                    r#"<a href="https://x.com/afterglowwatch">@afterglowwatch on X</a> · <a href="https://bsky.app/profile/afterglow.watch">@afterglow.watch on Bluesky</a>"#
+                    r#"<a href="https://github.com/afterglowhq/afterglow">source on GitHub</a> · <a href="https://x.com/afterglowwatch">@afterglowwatch on X</a> · <a href="https://bsky.app/profile/afterglow.watch">@afterglow.watch on Bluesky</a>"#
                 ),
                 "{uri}: {page}"
             );
