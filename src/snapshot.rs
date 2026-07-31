@@ -5,10 +5,10 @@ use rusqlite::params;
 
 use crate::github::{GitHub, SearchItem};
 use crate::plural;
-use crate::serve::EMBED_DAILY_BUDGET;
+use crate::serve::{EMBED_DAILY_BUDGET, MANUAL_DAILY_BUDGET};
 use crate::store::{
     APPEND_SNAPSHOT, DEQUEUE_ENROLLMENT, MARK_INACTIVE, QUEUED_ENROLLMENTS, Store, UPSERT_REPO,
-    record_repo,
+    opted_out, record_repo,
 };
 use crate::time::{SECONDS_PER_DAY, date_utc, iso8601_utc, now_unix};
 
@@ -39,11 +39,16 @@ pub fn run(store: &mut Store, gh: &GitHub) -> Result<()> {
     items.sort_unstable_by_key(|it| &it.full_name);
 
     let tx = store.conn.transaction()?;
-    let mut appended = 0usize;
+    let (mut appended, mut declined) = (0usize, 0usize);
     {
         let mut upsert = tx.prepare(UPSERT_REPO)?;
         let mut append = tx.prepare(APPEND_SNAPSHOT)?;
         for it in &items {
+            // The search does not know who asked to be left alone (ToS rule 4).
+            if opted_out(&tx, it.id)? {
+                declined += 1;
+                continue;
+            }
             upsert.execute(params![it.id, it.full_name, "scan", ts, it.created_at])?;
             appended += append.execute(params![
                 it.id,
@@ -59,36 +64,41 @@ pub fn run(store: &mut Store, gh: &GitHub) -> Result<()> {
     tx.commit()?;
 
     println!(
-        "{ts}  {} seen, {} appended",
+        "{ts}  {} seen, {} appended, {} opted out",
         plural(items.len(), "repo"),
-        plural(appended, "snapshot row")
+        plural(appended, "snapshot row"),
+        declined
     );
 
     drain_queue(store, gh, &ts)?;
     sweep(store, gh, now, &ts)
 }
 
-/// Enrollment overflow from the badge path, oldest first, capped at one day's
-/// budget. A GitHub failure stops the drain with the rest still queued: they
-/// enroll on a later day, never dropped (ADR-002).
+/// Enrollment overflow from both request lanes, oldest first, capped at a day's
+/// worth of budget. A GitHub failure stops the drain with the rest still queued:
+/// they enroll on a later day, never dropped (ADR-002).
 fn drain_queue(store: &mut Store, gh: &GitHub, ts: &str) -> Result<()> {
-    let queued: Vec<String> = {
+    let queued: Vec<(String, String)> = {
         let mut stmt = store.conn.prepare(QUEUED_ENROLLMENTS)?;
-        let rows = stmt.query_map(params![EMBED_DAILY_BUDGET], |row| row.get(0))?;
+        let budget = EMBED_DAILY_BUDGET + MANUAL_DAILY_BUDGET;
+        let rows = stmt.query_map(params![budget], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
-    let (mut enrolled, mut unresolvable) = (0usize, 0usize);
-    for name in &queued {
+    let (mut enrolled, mut dropped) = (0usize, 0usize);
+    for (name, lane) in &queued {
         match gh.repo(name) {
-            Ok(Some(repo)) => {
-                record_repo(&store.conn, &repo, "embed", ts)?;
+            // A queued name resolving onto an opted-out id is the rename case:
+            // the id decides, and it leaves the queue without a row (ToS rule 4).
+            Ok(Some(repo)) if !opted_out(&store.conn, repo.id)? => {
+                // The lane the request arrived through, not the lane that drains it.
+                record_repo(&store.conn, &repo, lane, ts)?;
                 store.conn.execute(DEQUEUE_ENROLLMENT, params![name])?;
                 enrolled += 1;
             }
-            Ok(None) => {
-                // A name nobody can resolve would otherwise be retried forever.
+            // A name nobody can resolve would otherwise be retried forever.
+            Ok(_) => {
                 store.conn.execute(DEQUEUE_ENROLLMENT, params![name])?;
-                unresolvable += 1;
+                dropped += 1;
             }
             Err(e) => {
                 eprintln!("queue drain stopped at {name}: {e:#}");
@@ -98,9 +108,9 @@ fn drain_queue(store: &mut Store, gh: &GitHub, ts: &str) -> Result<()> {
     }
     let left: i64 = store.conn.query_row(QUEUE_DEPTH, [], |row| row.get(0))?;
     println!(
-        "queue: {} enrolled, {} dropped as unresolvable, {} still waiting",
+        "queue: {} enrolled, {} dropped as unresolvable or opted out, {} still waiting",
         plural(enrolled, "repo"),
-        plural(unresolvable, "name"),
+        plural(dropped, "name"),
         left
     );
     Ok(())
@@ -184,14 +194,22 @@ mod tests {
     }
 
     fn track(store: &Store, id: i64, name: &str, lane: &str) {
+        track_as(store, id, name, lane, "active");
+    }
+
+    fn track_as(store: &Store, id: i64, name: &str, lane: &str, status: &str) {
         store
             .conn
             .execute(
-                "INSERT INTO repos (id, full_name, lane, enrolled_at)
-                 VALUES (?1, ?2, ?3, '2026-01-01T00:00:00Z')",
-                params![id, name, lane],
+                "INSERT INTO repos (id, full_name, status, lane, enrolled_at)
+                 VALUES (?1, ?2, ?3, ?4, '2026-01-01T00:00:00Z')",
+                params![id, name, status, lane],
             )
             .expect("seeding a repo");
+    }
+
+    fn search_page(items: &[String]) -> String {
+        format!(r#"{{"items":[{}]}}"#, items.join(","))
     }
 
     fn snapshot(store: &Store, id: i64, ts: &str, stars: i64) {
@@ -205,10 +223,25 @@ mod tests {
     }
 
     fn queue(store: &Store, name: &str, at: &str) {
+        queue_as(store, name, at, "embed");
+    }
+
+    fn queue_as(store: &Store, name: &str, at: &str, lane: &str) {
         store
             .conn
-            .execute(QUEUE_ENROLLMENT, params![name, at])
+            .execute(QUEUE_ENROLLMENT, params![name, at, lane])
             .expect("queueing");
+    }
+
+    fn lane_of(store: &Store, name: &str) -> String {
+        store
+            .conn
+            .query_row(
+                "SELECT lane FROM repos WHERE full_name = ?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .expect(name)
     }
 
     fn scalar<T: rusqlite::types::FromSql>(store: &Store, sql: &str) -> T {
@@ -246,6 +279,24 @@ mod tests {
     }
 
     #[test]
+    fn a_drained_name_is_recorded_under_the_lane_that_asked_for_it() {
+        let mut s = store();
+        queue_as(&s, "a/badge", "2026-07-30T01:00:00Z", "embed");
+        queue_as(&s, "b/typed", "2026-07-30T02:00:00Z", "manual");
+        let (base, _) = stub(vec![
+            (200, repo_json(1, "a/badge", 10, "2026-01-01T00:00:00Z")),
+            (200, repo_json(2, "b/typed", 20, "2026-01-01T00:00:00Z")),
+        ]);
+
+        drain_queue(&mut s, &GitHub::at(&base), NOW).unwrap();
+
+        // The lane is how a repo entered (ADR-002). Overflow means it
+        // entered a day late, not that it entered through the drain.
+        assert_eq!(lane_of(&s, "a/badge"), "embed");
+        assert_eq!(lane_of(&s, "b/typed"), "manual");
+    }
+
+    #[test]
     fn a_github_failure_leaves_the_rest_of_the_queue_for_a_later_day() {
         let mut s = store();
         queue(&s, "a/one", "2026-07-30T01:00:00Z");
@@ -258,6 +309,51 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(scalar::<i64>(&s, "SELECT COUNT(*) FROM enroll_queue"), 2);
         assert_eq!(scalar::<i64>(&s, "SELECT COUNT(*) FROM repos"), 0);
+    }
+
+    /// Every collecting path has to agree that an opted-out repo is left alone:
+    /// the search sweep that never asked, and the queue holding a name from
+    /// before the opt-out (ToS rule 4).
+    #[test]
+    fn nothing_collects_for_a_repo_that_opted_out() {
+        let mut s = store();
+        track_as(&s, 2, "b/old-name", "scan", "opted_out");
+        let created = "2026-06-01T00:00:00Z";
+        queue(&s, "b/renamed", "2026-07-30T01:00:00Z");
+        let (base, hits) = stub(vec![
+            (
+                200,
+                search_page(&[
+                    repo_json(1, "a/keep", 100, created),
+                    repo_json(2, "b/renamed", 5_000, created),
+                ]),
+            ),
+            (200, search_page(&[])),
+            (200, search_page(&[])),
+            (200, search_page(&[])),
+            // What the queue drain gets when it asks about the name it parked.
+            (200, repo_json(2, "b/renamed", 5_000, created)),
+        ]);
+
+        run(&mut s, &GitHub::at(&base)).unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 5);
+        // The scan found it and wrote nothing; the name in the store did not move.
+        assert_eq!(
+            scalar::<i64>(&s, "SELECT COUNT(*) FROM snapshots WHERE repo_id = 2"),
+            0
+        );
+        assert_eq!(
+            scalar::<String>(&s, "SELECT full_name FROM repos WHERE id = 2"),
+            "b/old-name"
+        );
+        // The queued name resolved onto the opted-out id and left the queue.
+        assert_eq!(scalar::<i64>(&s, "SELECT COUNT(*) FROM enroll_queue"), 0);
+        // The repo that never opted out is collected as usual.
+        assert_eq!(
+            scalar::<i64>(&s, "SELECT COUNT(*) FROM snapshots WHERE repo_id = 1"),
+            1
+        );
     }
 
     #[test]

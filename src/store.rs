@@ -1,13 +1,14 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::github::Repo;
 
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/001-store.sql"),
     include_str!("migrations/002-enroll-queue.sql"),
+    include_str!("migrations/003-opt-out.sql"),
 ];
 
 /// `enrolled_at` only ever moves earlier: it is the first sight, and importing
@@ -28,16 +29,65 @@ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
 pub const REPO_ID_BY_NAME: &str = "SELECT id FROM repos WHERE full_name = ?1 ORDER BY id LIMIT 1";
 
+/// The lane rides along because it is how the repo entered, and only the request
+/// knows it. A name queued twice keeps the lane that first asked for it.
 pub const QUEUE_ENROLLMENT: &str = "\
-INSERT OR IGNORE INTO enroll_queue (full_name, requested_at) VALUES (?1, ?2)";
+INSERT OR IGNORE INTO enroll_queue (full_name, requested_at, lane) VALUES (?1, ?2, ?3)";
 
 pub const QUEUED_ENROLLMENTS: &str = "\
-SELECT full_name FROM enroll_queue ORDER BY requested_at, full_name LIMIT ?1";
+SELECT full_name, lane FROM enroll_queue ORDER BY requested_at, full_name LIMIT ?1";
 
 pub const DEQUEUE_ENROLLMENT: &str = "DELETE FROM enroll_queue WHERE full_name = ?1";
 
 /// Series are retained when a repo goes away; only the badge changes.
 pub const MARK_INACTIVE: &str = "UPDATE repos SET status = 'inactive' WHERE id = ?1";
+
+const REPO_BY_NAME_NOCASE: &str = "\
+SELECT id, full_name FROM repos WHERE full_name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1";
+
+const SET_STATUS: &str = "UPDATE repos SET status = ?2 WHERE id = ?1";
+
+const IS_OPTED_OUT: &str = "SELECT 1 FROM repos WHERE id = ?1 AND status = 'opted_out'";
+
+/// Nothing is collected for an opted-out repo and no surface shows it, so every
+/// lane asks this before it writes a row (ToS rule 4).
+pub fn opted_out(conn: &Connection, id: i64) -> Result<bool> {
+    Ok(conn
+        .prepare(IS_OPTED_OUT)?
+        .query_row(params![id], |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
+/// The operator's half of the opt-out lane: a maintainer emails, a human verifies
+/// they own the repo, and this flips the row. The series already collected stays
+/// where it is, because a snapshot is never deleted; it just stops being shown.
+///
+/// Undo puts the repo back in the active set. It does not re-decide whether the
+/// repo is still observable: the next sweep does that, the way it does for
+/// everything else.
+pub fn opt_out(store: &Store, full_name: &str, undo: bool) -> Result<()> {
+    let (id, name) = store
+        .conn
+        .prepare(REPO_BY_NAME_NOCASE)?
+        .query_row(params![full_name], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?
+        .with_context(|| format!("{full_name} is not tracked, so there is nothing to opt out"))?;
+
+    let status = if undo { "active" } else { "opted_out" };
+    store.conn.execute(SET_STATUS, params![id, status])?;
+    println!(
+        "{name} ({id}) {}",
+        if undo {
+            "is tracked again; its badge and its rankings row are back"
+        } else {
+            "opted out; its badge reads not tracked and it leaves the rankings"
+        }
+    );
+    Ok(())
+}
 
 /// The repo row and the snapshot that a per-repo GET just paid for. `lane` is only
 /// read when the row is new, so a sweep passes the lane the repo already has.
@@ -83,12 +133,17 @@ impl Store {
     fn prepare(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "wal")?;
         conn.pragma_update(None, "synchronous", "normal")?;
-        conn.pragma_update(None, "foreign_keys", true)?;
         // The badge server and the snapshot timer are separate processes on one
         // db; a write landing mid-transaction should wait, not fail SQLITE_BUSY.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Foreign keys go on after the migrations, not before: rebuilding a table
+        // means dropping and renaming under the rows that reference it, which
+        // SQLite only allows with the constraint off. This is step one of its own
+        // ALTER TABLE procedure; step ten is the foreign_key_check in migrate().
+        conn.pragma_update(None, "foreign_keys", false)?;
         let mut store = Store { conn };
         store.migrate()?;
+        store.conn.pragma_update(None, "foreign_keys", true)?;
         Ok(store)
     }
 
@@ -107,6 +162,13 @@ impl Store {
             let tx = self.conn.transaction()?;
             tx.execute_batch(sql)
                 .with_context(|| format!("applying migration {version}"))?;
+            // A rebuilt table that lost its children would take the moat with it,
+            // and enforcement is off while migrations run, so this is the check
+            // that a migration left every reference resolvable.
+            ensure!(
+                !tx.prepare("PRAGMA foreign_key_check")?.exists([])?,
+                "migration {version} left dangling references"
+            );
             tx.pragma_update(None, "user_version", version as i64)?;
             tx.commit()?;
         }
@@ -172,7 +234,8 @@ mod tests {
     }
 
     /// The deployed store is mid-list; later migrations have to land on top of it
-    /// without touching what is already there.
+    /// without touching what is already there. Migration 3 rebuilds `repos`, so
+    /// this is also the test that the rebuild keeps the rows the moat is made of.
     #[test]
     fn migrations_apply_on_top_of_an_older_store() {
         let path = temp_path("additive");
@@ -180,7 +243,19 @@ mod tests {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(MIGRATIONS[0]).unwrap();
             conn.execute(
-                "INSERT INTO repos (id, full_name, lane, enrolled_at) VALUES (7, 'a/b', 'scan', '2026-07-30T00:00:00Z')",
+                "INSERT INTO repos (id, full_name, status, lane, enrolled_at, created_at)
+                 VALUES (7, 'a/b', 'inactive', 'scan', '2026-07-30T00:00:00Z', '2020-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO snapshots (repo_id, ts, stars) VALUES (7, '2026-07-30T00:00:00Z', 42)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO prehistory_monthly (full_name, month, gross_watch_events, repo_id)
+                 VALUES ('a/b', '2020-01', 9, 7)",
                 [],
             )
             .unwrap();
@@ -193,20 +268,138 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, MIGRATIONS.len() as i64);
-        let name: String = store
+        // Every column came across the rebuild, not just the key.
+        let row: (String, String, String, String, String) = store
             .conn
-            .query_row("SELECT full_name FROM repos WHERE id = 7", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT full_name, status, lane, enrolled_at, created_at FROM repos WHERE id = 7",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
             .unwrap();
-        assert_eq!(name, "a/b");
+        assert_eq!(
+            row,
+            (
+                "a/b".to_string(),
+                "inactive".to_string(),
+                "scan".to_string(),
+                "2026-07-30T00:00:00Z".to_string(),
+                "2020-01-01T00:00:00Z".to_string(),
+            )
+        );
+        // The snapshot that hung off it is still there and still points at it.
+        let stars: i64 = store
+            .conn
+            .query_row(
+                "SELECT s.stars FROM snapshots s JOIN repos r ON r.id = s.repo_id",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stars, 42);
+        assert!(
+            store
+                .conn
+                .prepare("PRAGMA index_list(repos)")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
         store
             .conn
-            .execute(QUEUE_ENROLLMENT, params!["c/d", "2026-07-31T00:00:00Z"])
+            .execute(
+                QUEUE_ENROLLMENT,
+                params!["c/d", "2026-07-31T00:00:00Z", "manual"],
+            )
             .unwrap();
 
         drop(store);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The migration guard is only worth having if it can fail, and a check that
+    /// silently reports nothing would be indistinguishable from a clean store.
+    #[test]
+    fn the_migration_guard_notices_a_dangling_reference() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .conn
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO prehistory_monthly (full_name, month, gross_watch_events, repo_id)
+                 VALUES ('a/b', '2020-01', 5, 999)",
+                [],
+            )
+            .unwrap();
+        assert!(
+            store
+                .conn
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn the_rebuilt_status_check_takes_opted_out_and_nothing_else() {
+        let store = Store::open_in_memory().unwrap();
+        let insert = "INSERT INTO repos (id, full_name, status, lane, enrolled_at)
+                      VALUES (?1, 'a/b', ?2, 'scan', '2026-07-30T00:00:00Z')";
+        for (id, status) in [(1, "active"), (2, "inactive"), (3, "opted_out")] {
+            store.conn.execute(insert, params![id, status]).unwrap();
+        }
+        let err = store
+            .conn
+            .execute(insert, params![4, "shadowbanned"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("CHECK"), "{err}");
+    }
+
+    #[test]
+    fn opting_out_flips_the_status_and_undo_puts_it_back() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO repos (id, full_name, lane, enrolled_at)
+                 VALUES (1, 'Owner/Repo', 'scan', '2026-07-30T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let status = || -> String {
+            store
+                .conn
+                .query_row("SELECT status FROM repos WHERE id = 1", [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+
+        // Whatever case the maintainer's email used.
+        opt_out(&store, "owner/repo", false).unwrap();
+        assert_eq!(status(), "opted_out");
+        assert!(opted_out(&store.conn, 1).unwrap());
+
+        opt_out(&store, "Owner/Repo", true).unwrap();
+        assert_eq!(status(), "active");
+        assert!(!opted_out(&store.conn, 1).unwrap());
+
+        // A name we do not have is an error, not a quiet success.
+        let err = opt_out(&store, "who/knows", false).unwrap_err().to_string();
+        assert!(err.contains("not tracked"), "{err}");
     }
 
     #[test]

@@ -8,6 +8,7 @@ mod badge;
 mod github;
 mod import;
 mod serve;
+mod site;
 mod snapshot;
 mod store;
 mod time;
@@ -64,6 +65,15 @@ enum Command {
     },
     /// Snapshot the tracked set
     Snapshot,
+    /// Stop showing a repo, at its maintainer's request
+    Optout {
+        /// The repo to drop, as owner/name
+        #[arg(value_name = "OWNER/REPO")]
+        repo: String,
+        /// Put it back in the tracked set
+        #[arg(long)]
+        undo: bool,
+    },
     /// Bring existing history into the store
     Import {
         #[command(subcommand)]
@@ -106,6 +116,7 @@ fn main() -> Result<()> {
             let gh = GitHub::from_env()?;
             snapshot::run(&mut Store::open(&cli.db)?, &gh)
         }
+        Command::Optout { repo, undo } => store::opt_out(&Store::open(&cli.db)?, &repo, undo),
         Command::Import { source } => match source {
             Source::Tsv { path } => import::run_tsv(&mut Store::open(&cli.db)?, &path),
             Source::Prehistory { path, manifest } => {

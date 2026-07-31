@@ -1,6 +1,7 @@
-//! The badge server. Two URL shapes, both immortal once public (SPEC §5), and one
-//! rule underneath them: a badge is answered from the snapshot store, never from a
-//! live API call (ToS rule 6). The only GitHub request on this path is the one that
+//! The badge server, and the two HTML pages that make a badge checkable. The badge
+//! URL shapes are immortal once public (SPEC §5), and one rule sits under all of
+//! it: what we show is answered from the snapshot store, never from a live API
+//! call (ToS rule 6). The only GitHub request on these paths is the one that
 //! enrolls a repo nobody has asked for before.
 
 use std::collections::HashMap;
@@ -10,21 +11,27 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
 use axum::Router;
-use axum::extract::rejection::QueryRejection;
-use axum::extract::{Path, Query, State};
+use axum::extract::rejection::{FormRejection, QueryRejection};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum_server::tls_rustls::RustlsConfig;
+use maud::Markup;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Deserialize;
 
 use crate::badge::{self, BadgeState, RepoBadge, Theme};
 use crate::github::GitHub;
-use crate::store::{QUEUE_ENROLLMENT, Store, record_repo};
+use crate::site;
+use crate::store::{QUEUE_ENROLLMENT, Store, opted_out, record_repo};
 use crate::time::{SECONDS_PER_DAY, date_utc, iso8601_utc, now_unix, parse_iso8601_utc};
 
 /// Enrollments the embed lane spends in one UTC day; overflow queues (ADR-002).
 pub const EMBED_DAILY_BUDGET: u32 = 256;
+/// The site form's own budget. Smaller than the embed lane's: a person typing a
+/// name is rarer than a README loading, and it queues rather than refuses.
+pub const MANUAL_DAILY_BUDGET: u32 = 64;
 
 /// Two readings closer together than this are the same day seen twice, not a delta.
 const MIN_VELOCITY_SPAN_HOURS: i64 = 12;
@@ -34,24 +41,47 @@ const SPARK_DAYS: i64 = 30;
 /// Above this age a repo gets no proxy number, only `measuring` (ticket 007).
 const PROXY_MAX_AGE_DAYS: f64 = 180.0;
 
-/// The card's spark region: 388 wide, stars mapped between these two rows.
-const SPARK_WIDTH: f64 = 388.0;
-const SPARK_TOP: f64 = 4.0;
-const SPARK_BOTTOM: f64 = 36.0;
-const SPARK_FLAT: f64 = 20.0;
+/// Where a series is drawn: x across the width, stars between the two rows, a
+/// flat series along the middle one.
+pub struct Region {
+    pub width: f64,
+    top: f64,
+    bottom: f64,
+    flat: f64,
+}
+
+/// The card's spark region, 388 wide, and the leaderboard's minispark, the same
+/// shape at row height.
+const CARD_SPARK: Region = Region {
+    width: 388.0,
+    top: 4.0,
+    bottom: 36.0,
+    flat: 20.0,
+};
+pub const MINI_SPARK: Region = Region {
+    width: 100.0,
+    top: 4.0,
+    bottom: 20.0,
+    flat: 12.0,
+};
+/// The box the minispark is drawn in; its area fill closes on the bottom edge.
+pub const MINI_SPARK_HEIGHT: f64 = 24.0;
 
 /// Day-one and not-tracked states change tomorrow; measured badges can sit in the CDN.
 const FRESH_MAX_AGE: u32 = 300;
 const SETTLED_MAX_AGE: u32 = 3600;
 
-const INDEX: &str = "\
-Afterglow snapshots GitHub star counts once a day and serves them back as a README badge.
+/// Both pages are a snapshot of a store that moves once a day.
+const PAGE_CACHE: &str = "public, max-age=300";
+/// What the form says back is about one request and belongs to nobody else.
+const NO_STORE: &str = "no-store";
+/// The font is content-addressed by its path; a new cut would get a new one.
+const FONT_CACHE: &str = "public, max-age=31536000, immutable";
 
-Point an image at /badge/{owner}/{repo} for the pill, add ?style=card for the card with a 30-day
-sparkline, and ?theme=dark if the README is dark.
-Asking for a repo we have not seen before is what starts it being tracked, so its first badge says
-tracking just started and the history builds from there.
-";
+/// Mona Sans, GitHub's own open font, self-hosted: no font CDN, and one fewer
+/// party watching who reads the page.
+const MONA_SANS: &[u8] = include_bytes!("../static/mona-sans.woff2");
+pub const FONT_URL: &str = "/static/mona-sans.woff2";
 
 const NOT_FOUND: &str = "Nothing here. Badges are at /badge/{owner}/{repo}.\n";
 
@@ -72,8 +102,11 @@ SELECT ts, stars FROM snapshots WHERE repo_id = ?1 AND ts <= ?2 ORDER BY ts DESC
 const SNAPSHOTS_SINCE: &str = "\
 SELECT ts, stars FROM snapshots WHERE repo_id = ?1 AND ts >= ?2 ORDER BY ts";
 
+/// The fleet's recent readings in one pass. `status = 'active'` is what keeps an
+/// opted-out repo out of both the percentile pool and the leaderboard.
 const RECENT_SNAPSHOTS: &str = "\
-SELECT s.repo_id, s.ts, s.stars FROM snapshots s JOIN repos r ON r.id = s.repo_id
+SELECT s.repo_id, r.full_name, r.created_at, s.ts, s.stars
+FROM snapshots s JOIN repos r ON r.id = s.repo_id
 WHERE r.status = 'active' AND s.ts >= ?1
 ORDER BY s.repo_id, s.ts";
 
@@ -81,6 +114,30 @@ pub struct AppState {
     store: Mutex<Store>,
     github: GitHub,
     embed: Mutex<Budget>,
+    manual: Mutex<Budget>,
+}
+
+/// Which lane an enrollment is spending, and what the repo row will record.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    Embed,
+    Manual,
+}
+
+impl Lane {
+    fn name(self) -> &'static str {
+        match self {
+            Lane::Embed => "embed",
+            Lane::Manual => "manual",
+        }
+    }
+
+    fn daily_budget(self) -> u32 {
+        match self {
+            Lane::Embed => EMBED_DAILY_BUDGET,
+            Lane::Manual => MANUAL_DAILY_BUDGET,
+        }
+    }
 }
 
 /// In memory, so a restart refills the day's budget. At one host and 256
@@ -91,15 +148,22 @@ struct Budget {
     spent: u32,
 }
 
+impl Budget {
+    fn fresh() -> Mutex<Budget> {
+        Mutex::new(Budget {
+            date: String::new(),
+            spent: 0,
+        })
+    }
+}
+
 impl AppState {
     pub fn new(store: Store, github: GitHub) -> Self {
         AppState {
             store: Mutex::new(store),
             github,
-            embed: Mutex::new(Budget {
-                date: String::new(),
-                spent: 0,
-            }),
+            embed: Budget::fresh(),
+            manual: Budget::fresh(),
         }
     }
 
@@ -108,14 +172,21 @@ impl AppState {
         self.store.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Counts an enrollment attempt, or refuses once the day is spent.
-    fn spend_enrollment(&self, today: &str) -> bool {
-        let mut budget = self.embed.lock().unwrap_or_else(|e| e.into_inner());
+    /// Counts an enrollment attempt against its lane, or refuses once the day is
+    /// spent. The lanes hold separate budgets so a busy README cannot eat the
+    /// allowance the site form runs on.
+    fn spend_enrollment(&self, lane: Lane, today: &str) -> bool {
+        let mut budget = match lane {
+            Lane::Embed => &self.embed,
+            Lane::Manual => &self.manual,
+        }
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
         if budget.date != today {
             budget.date = today.to_string();
             budget.spent = 0;
         }
-        if budget.spent >= EMBED_DAILY_BUDGET {
+        if budget.spent >= lane.daily_budget() {
             return false;
         }
         budget.spent += 1;
@@ -160,24 +231,76 @@ async fn listen_and_serve(
 fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/rankings", get(rankings))
+        .route("/enroll", post(enroll_form))
         .route("/badge/{owner}/{repo}", get(canonical_badge))
         .route("/svg", get(compat_badge))
+        .route(FONT_URL, get(font))
         .fallback(missing)
         .with_state(state)
 }
 
 #[derive(Clone, Copy)]
-enum Form {
+enum Shape {
     Pill,
     Card(Theme),
 }
 
-async fn index() -> Response {
-    text(StatusCode::OK, INDEX)
+async fn index(State(state): State<Arc<AppState>>) -> Response {
+    html(site::index(&load_board(&state).await), PAGE_CACHE)
+}
+
+async fn rankings(State(state): State<Arc<AppState>>) -> Response {
+    html(site::rankings(&load_board(&state).await), PAGE_CACHE)
+}
+
+/// The form's own answer, about one submission: never cached, never shared.
+async fn enroll_form(
+    State(state): State<Arc<AppState>>,
+    form: Result<Form<Submission>, FormRejection>,
+) -> Response {
+    let raw = form.map(|Form(f)| f.repo).unwrap_or_default();
+    let Some(full_name) = repo_name(&raw) else {
+        return html(site::enrolled(&Outcome::Malformed), NO_STORE);
+    };
+    let outcome = tokio::task::spawn_blocking(move || submit(&state, &full_name, now_unix()))
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("enroll form: {e}");
+            Outcome::Nothing {
+                full_name: String::new(),
+            }
+        });
+    html(site::enrolled(&outcome), NO_STORE)
+}
+
+async fn font() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("font/woff2")),
+            (header::CACHE_CONTROL, HeaderValue::from_static(FONT_CACHE)),
+        ],
+        MONA_SANS,
+    )
+        .into_response()
 }
 
 async fn missing() -> Response {
     text(StatusCode::NOT_FOUND, NOT_FOUND)
+}
+
+/// A page whose board could not be read shows an empty board, the same way a badge
+/// that cannot be read renders not-tracked: the numbers are missing, not the site.
+async fn load_board(state: &Arc<AppState>) -> Board {
+    let state = Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        let store = state.store();
+        logged("rankings", board(&store.conn, now_unix()))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default()
 }
 
 async fn canonical_badge(
@@ -187,11 +310,11 @@ async fn canonical_badge(
 ) -> Response {
     let q = query.map(|Query(q)| q).unwrap_or_default();
     // An unreadable style falls back to the pill: this URL never gets to error.
-    let form = match q.get("style").map(String::as_str) {
-        Some("card") => Form::Card(theme_of(&q)),
-        _ => Form::Pill,
+    let shape = match q.get("style").map(String::as_str) {
+        Some("card") => Shape::Card(theme_of(&q)),
+        _ => Shape::Pill,
     };
-    render(state, &format!("{owner}/{repo}"), form).await
+    render(state, &format!("{owner}/{repo}"), shape).await
 }
 
 /// star-history's embed shape, so migrating a dead chart is a one-hostname edit.
@@ -207,7 +330,7 @@ async fn compat_badge(
         .unwrap_or_default()
         .trim()
         .to_string();
-    render(state, &first, Form::Card(theme_of(&q))).await
+    render(state, &first, Shape::Card(theme_of(&q))).await
 }
 
 fn theme_of(q: &HashMap<String, String>) -> Theme {
@@ -217,7 +340,7 @@ fn theme_of(q: &HashMap<String, String>) -> Theme {
     }
 }
 
-async fn render(state: Arc<AppState>, full_name: &str, form: Form) -> Response {
+async fn render(state: Arc<AppState>, full_name: &str, shape: Shape) -> Response {
     let name = full_name.to_string();
     let resolved = {
         let (state, name) = (Arc::clone(&state), name.clone());
@@ -228,11 +351,11 @@ async fn render(state: Arc<AppState>, full_name: &str, form: Form) -> Response {
         eprintln!("badge {name}: {e}");
         None
     });
-    let (svg, max_age) = match (&badge, form) {
-        (Some(b), Form::Pill) => (badge::pill(b), max_age_for(b.state)),
-        (Some(b), Form::Card(theme)) => (badge::card(b, theme), max_age_for(b.state)),
-        (None, Form::Pill) => (badge::not_tracked_pill(&name), FRESH_MAX_AGE),
-        (None, Form::Card(theme)) => (badge::not_tracked_card(&name, theme), FRESH_MAX_AGE),
+    let (svg, max_age) = match (&badge, shape) {
+        (Some(b), Shape::Pill) => (badge::pill(b), max_age_for(b.state)),
+        (Some(b), Shape::Card(theme)) => (badge::card(b, theme), max_age_for(b.state)),
+        (None, Shape::Pill) => (badge::not_tracked_pill(&name), FRESH_MAX_AGE),
+        (None, Shape::Card(theme)) => (badge::not_tracked_card(&name, theme), FRESH_MAX_AGE),
     };
     svg_response(svg, max_age)
 }
@@ -262,6 +385,20 @@ fn svg_response(body: String, max_age: u32) -> Response {
         .into_response()
 }
 
+fn html(body: Markup, cache: &'static str) -> Response {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static(cache)),
+        ],
+        body.into_string(),
+    )
+        .into_response()
+}
+
 fn text(status: StatusCode, body: &'static str) -> Response {
     (
         status,
@@ -279,9 +416,29 @@ fn text(status: StatusCode, body: &'static str) -> Response {
 struct Tracked {
     id: i64,
     full_name: String,
-    active: bool,
+    status: Status,
     enrolled_at: String,
     created_at: Option<String>,
+}
+
+/// What the repo row says we may do with a repo.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Active,
+    /// Gone from our vantage point: the series is kept, the badge says paused.
+    Inactive,
+    /// The maintainer asked us to stop (ToS rule 4).
+    OptedOut,
+}
+
+impl Status {
+    fn read(s: &str) -> Status {
+        match s {
+            "inactive" => Status::Inactive,
+            "opted_out" => Status::OptedOut,
+            _ => Status::Active,
+        }
+    }
 }
 
 struct Reading {
@@ -301,11 +458,18 @@ fn resolve(state: &AppState, full_name: &str, now: i64) -> Option<RepoBadge> {
         logged(full_name, find_repo(&store.conn, full_name))?
     };
     match tracked {
+        // An opted-out repo reads exactly like one we never saw. Not paused:
+        // paused says we are still watching and cannot see, which
+        // is not what a maintainer who asked us to stop agreed to.
+        Some(repo) if repo.status == Status::OptedOut => None,
         Some(repo) => {
             let store = state.store();
             logged(full_name, build(&store.conn, &repo, now))?
         }
-        None => enroll(state, full_name, now),
+        None => match enroll(state, Lane::Embed, full_name, now) {
+            Enrollment::Started(badge) => Some(badge),
+            _ => None,
+        },
     }
 }
 
@@ -331,7 +495,7 @@ fn find_repo(conn: &Connection, full_name: &str) -> Result<Option<Tracked>> {
             Ok(Tracked {
                 id: row.get(0)?,
                 full_name: row.get(1)?,
-                active: row.get::<_, String>(2)? == "active",
+                status: Status::read(&row.get::<_, String>(2)?),
                 enrolled_at: row.get(3)?,
                 created_at: row.get(4)?,
             })
@@ -346,7 +510,7 @@ fn build(conn: &Connection, repo: &Tracked, now: i64) -> Result<Option<RepoBadge
         Some(l) => velocity(conn, repo.id, l)?,
         None => None,
     };
-    let state = if !repo.active {
+    let state = if repo.status != Status::Active {
         BadgeState::Paused
     } else if let Some(velocity) = measured {
         BadgeState::Measured {
@@ -417,44 +581,66 @@ fn proxy_average(created_at: Option<&str>, stars: i64, now: i64) -> Option<i64> 
     Some((stars as f64 / age_days.max(1.0)).round() as i64)
 }
 
-/// Where this velocity sits among every repo we can currently measure.
+/// One repo's recent readings, with what a leaderboard row needs around them.
+struct Series {
+    id: i64,
+    full_name: String,
+    created_at: Option<String>,
+    readings: Vec<Reading>,
+}
+
+/// Every measurable repo's recent window, in one pass.
 ///
-/// One pass over the recent snapshots per request, which is free at
-/// hundreds of repos. Precompute it into a table at tens of thousands.
-fn percentile(conn: &Connection, velocity: i64, now: i64) -> Result<f64> {
+/// One pass per request, free at hundreds of repos, and it is what
+/// keeps a row and a card deriving their numbers from the same rows. Precompute
+/// the velocities into a table at tens of thousands.
+fn recent_series(conn: &Connection, now: i64) -> Result<Vec<Series>> {
     let since = iso8601_utc(now - VELOCITY_WINDOW_DAYS * SECONDS_PER_DAY);
     let mut stmt = conn.prepare(RECENT_SNAPSHOTS)?;
-    let rows = stmt.query_map(params![since], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            Reading {
-                ts: row.get(1)?,
-                stars: row.get(2)?,
-            },
-        ))
-    })?;
+    let mut rows = stmt.query(params![since])?;
 
-    // Rows arrive grouped by repo and ordered in time, so pairing is a walk.
-    let mut fleet: Vec<i64> = Vec::new();
-    let mut current: Vec<Reading> = Vec::new();
-    let mut current_id = None;
-    for row in rows {
-        let (id, reading) = row?;
-        if current_id != Some(id) {
-            fleet.extend(series_velocity(&current));
-            current = Vec::new();
-            current_id = Some(id);
+    // Rows arrive grouped by repo and ordered in time, so grouping is a walk and
+    // a repo's name is only read off the first row of its group.
+    let mut out: Vec<Series> = Vec::new();
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        let reading = Reading {
+            ts: row.get(3)?,
+            stars: row.get(4)?,
+        };
+        match out.last_mut() {
+            Some(series) if series.id == id => series.readings.push(reading),
+            _ => out.push(Series {
+                id,
+                full_name: row.get(1)?,
+                created_at: row.get(2)?,
+                readings: vec![reading],
+            }),
         }
-        current.push(reading);
     }
-    fleet.extend(series_velocity(&current));
+    Ok(out)
+}
 
+/// Where this velocity sits among every repo we can currently measure.
+fn percentile(conn: &Connection, velocity: i64, now: i64) -> Result<f64> {
+    let series = recent_series(conn, now)?;
+    Ok(percentile_of(&fleet_velocities(&series), velocity))
+}
+
+fn fleet_velocities(series: &[Series]) -> Vec<i64> {
+    series
+        .iter()
+        .filter_map(|s| series_velocity(&s.readings))
+        .collect()
+}
+
+fn percentile_of(fleet: &[i64], velocity: i64) -> f64 {
     if fleet.is_empty() {
-        return Ok(100.0);
+        return 100.0;
     }
     // Nobody outranks themselves out of their own pool.
     let ahead = fleet.iter().filter(|&&v| v >= velocity).count().max(1);
-    Ok(100.0 * ahead as f64 / fleet.len() as f64)
+    100.0 * ahead as f64 / fleet.len() as f64
 }
 
 fn series_velocity(series: &[Reading]) -> Option<i64> {
@@ -464,8 +650,7 @@ fn series_velocity(series: &[Reading]) -> Option<i64> {
     pair_velocity(latest, prior)
 }
 
-/// The last 30 days as points in the card's spark region. x is real time, so a
-/// young series occupies only the right and the empty left is the whole point.
+/// The last 30 days as points in the card's spark region.
 fn spark(conn: &Connection, repo_id: i64, now: i64) -> Result<Vec<(f64, f64)>> {
     let start = now - SPARK_DAYS * SECONDS_PER_DAY;
     let mut stmt = conn.prepare(SNAPSHOTS_SINCE)?;
@@ -475,12 +660,19 @@ fn spark(conn: &Connection, repo_id: i64, now: i64) -> Result<Vec<(f64, f64)>> {
             stars: row.get(1)?,
         })
     })?;
+    let readings: Vec<Reading> = rows.collect::<rusqlite::Result<_>>()?;
+    Ok(spark_points(&readings, now, &CARD_SPARK))
+}
+
+/// The last 30 days of a series as points in a region. x is real time, so a young
+/// series occupies only the right and the empty left is the whole point.
+fn spark_points(readings: &[Reading], now: i64, region: &Region) -> Vec<(f64, f64)> {
+    let start = now - SPARK_DAYS * SECONDS_PER_DAY;
 
     // One point a day: the last reading of each UTC day.
     let mut daily: Vec<(i64, i64)> = Vec::new();
-    for row in rows {
-        let reading = row?;
-        let Some(at) = parse_iso8601_utc(&reading.ts) else {
+    for reading in readings {
+        let Some(at) = parse_iso8601_utc(&reading.ts).filter(|&at| at >= start) else {
             continue;
         };
         match daily.last_mut() {
@@ -491,7 +683,7 @@ fn spark(conn: &Connection, repo_id: i64, now: i64) -> Result<Vec<(f64, f64)>> {
         }
     }
     if daily.len() < 2 {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
     let (min, max) = daily
@@ -500,40 +692,155 @@ fn spark(conn: &Connection, repo_id: i64, now: i64) -> Result<Vec<(f64, f64)>> {
             (lo.min(s), hi.max(s))
         });
     let span = (now - start) as f64;
-    Ok(daily
+    daily
         .iter()
         .map(|&(at, stars)| {
-            let x = ((at - start) as f64 / span * SPARK_WIDTH).clamp(0.0, SPARK_WIDTH);
+            let x = ((at - start) as f64 / span * region.width).clamp(0.0, region.width);
             let y = if max == min {
-                SPARK_FLAT
+                region.flat
             } else {
-                SPARK_BOTTOM
-                    - (stars - min) as f64 / (max - min) as f64 * (SPARK_BOTTOM - SPARK_TOP)
+                region.bottom
+                    - (stars - min) as f64 / (max - min) as f64 * (region.bottom - region.top)
             };
             (x, y)
         })
-        .collect())
+        .collect()
 }
 
-// ---------------------------------------------------------------- embed-lane enrollment
+// ---------------------------------------------------------------- the leaderboard
 
-/// The first badge request for an untracked repo is what enrolls it (ADR-002).
-fn enroll(state: &AppState, full_name: &str, now: i64) -> Option<RepoBadge> {
+/// The velocity leaderboard: one list, ranked by the number itself, so the
+/// percentile a card claims is checkable against the row above and below it.
+#[derive(Default)]
+pub struct Board {
+    pub rows: Vec<BoardRow>,
+    /// The newest reading behind the page, for the attribution line (ToS rule 5).
+    pub through: Option<String>,
+}
+
+pub struct BoardRow {
+    pub full_name: String,
+    pub stars: i64,
+    pub velocity: RowVelocity,
+    /// Points in `MINI_SPARK`; measured rows only, because glow is earned.
+    pub spark: Vec<(f64, f64)>,
+}
+
+pub enum RowVelocity {
+    Measured {
+        per_day: i64,
+        top_percent: f64,
+    },
+    /// A young repo with nothing measured yet, ranked on its lifetime average and
+    /// wearing the mark that says so.
+    Proxy {
+        avg: i64,
+    },
+}
+
+impl RowVelocity {
+    /// What the row ranks on. A proxy number is not a measured one, but it is the
+    /// best claim that repo has, so it takes its place in the same list.
+    fn per_day(&self) -> i64 {
+        match *self {
+            RowVelocity::Measured { per_day, .. } => per_day,
+            RowVelocity::Proxy { avg } => avg,
+        }
+    }
+}
+
+fn board(conn: &Connection, now: i64) -> Result<Board> {
+    let series = recent_series(conn, now)?;
+    let measured: Vec<Option<i64>> = series
+        .iter()
+        .map(|s| series_velocity(&s.readings))
+        .collect();
+    let fleet: Vec<i64> = measured.iter().flatten().copied().collect();
+
+    let mut through: Option<&str> = None;
+    let mut rows: Vec<BoardRow> = Vec::new();
+    for (s, per_day) in series.iter().zip(&measured) {
+        let Some(latest) = s.readings.last() else {
+            continue;
+        };
+        through = through.max(Some(latest.ts.as_str()));
+        let (velocity, spark) = match *per_day {
+            Some(per_day) => (
+                RowVelocity::Measured {
+                    per_day,
+                    top_percent: percentile_of(&fleet, per_day),
+                },
+                spark_points(&s.readings, now, &MINI_SPARK),
+            ),
+            // Nothing measured: a young repo still has an honest average, and an
+            // old one has no number at all, so it has no row.
+            None => match proxy_average(s.created_at.as_deref(), latest.stars, now) {
+                Some(avg) => (RowVelocity::Proxy { avg }, Vec::new()),
+                None => continue,
+            },
+        };
+        rows.push(BoardRow {
+            full_name: s.full_name.clone(),
+            stars: latest.stars,
+            velocity,
+            spark,
+        });
+    }
+
+    rows.sort_by(|a, b| {
+        b.velocity
+            .per_day()
+            .cmp(&a.velocity.per_day())
+            .then_with(|| a.full_name.cmp(&b.full_name))
+    });
+    // Every row, not a top hundred: a card reading "top 80% velocity" belongs to a
+    // repo no short list would ever print, and SPEC §5 wants that number checkable
+    // here.
+    //
+    // The full board is ~25 KB gzipped at ~430 repos and stops being a
+    // page somewhere well short of the 50k-repo coverage floor. Pagination, or a
+    // top-N with a per-repo lookup, decided when the size actually bites.
+    Ok(Board {
+        rows,
+        through: through.map(str::to_string),
+    })
+}
+
+// ---------------------------------------------------------------- enrollment lanes
+
+/// What became of a repo nobody had tracked yet.
+enum Enrollment {
+    Started(RepoBadge),
+    /// Past the day's budget, or GitHub was unreachable: the name is parked and
+    /// a later day enrolls it (ADR-002).
+    Queued,
+    /// Unknown, private, or opted out. No rows either way, nothing to retry.
+    Nothing,
+}
+
+/// The first request for an untracked repo is what enrolls it, whichever lane it
+/// arrived through: a README loading its badge, or a name typed on the site.
+fn enroll(state: &AppState, lane: Lane, full_name: &str, now: i64) -> Enrollment {
     let ts = iso8601_utc(now);
-    if !state.spend_enrollment(&date_utc(now)) {
-        queue(state, full_name, &ts);
-        return None;
+    if !state.spend_enrollment(lane, &date_utc(now)) {
+        queue(state, lane, full_name, &ts);
+        return Enrollment::Queued;
     }
     // The store lock is never held across this call.
     match state.github.repo(full_name) {
         Ok(Some(repo)) => {
+            let store = state.store();
+            // A rename can hide an opted-out repo behind a name the store has
+            // never seen. The numeric id is what decides (ToS rule 4).
+            if logged(full_name, opted_out(&store.conn, repo.id)) != Some(false) {
+                return Enrollment::Nothing;
+            }
             let stars = repo.stargazers_count;
             let name = repo.full_name.clone();
-            logged(full_name, {
-                let store = state.store();
-                record_repo(&store.conn, &repo, "embed", &ts)
-            })?;
-            Some(RepoBadge {
+            if logged(full_name, record_repo(&store.conn, &repo, lane.name(), &ts)).is_none() {
+                return Enrollment::Nothing;
+            }
+            Enrollment::Started(RepoBadge {
                 full_name: name,
                 stars,
                 tracked_since: date_utc(now),
@@ -541,22 +848,95 @@ fn enroll(state: &AppState, full_name: &str, now: i64) -> Option<RepoBadge> {
                 spark: Vec::new(),
             })
         }
-        // Unknown or private: a neutral badge and no rows, nothing to retry.
-        Ok(None) => None,
+        Ok(None) => Enrollment::Nothing,
         Err(e) => {
             // A GitHub outage must never become a broken image; try again tomorrow.
             eprintln!("enrolling {full_name}: {e:#}");
-            queue(state, full_name, &ts);
-            None
+            queue(state, lane, full_name, &ts);
+            Enrollment::Queued
         }
     }
 }
 
-fn queue(state: &AppState, full_name: &str, ts: &str) {
+fn queue(state: &AppState, lane: Lane, full_name: &str, ts: &str) {
     let store = state.store();
-    if let Err(e) = store.conn.execute(QUEUE_ENROLLMENT, params![full_name, ts]) {
+    let queued = store
+        .conn
+        .execute(QUEUE_ENROLLMENT, params![full_name, ts, lane.name()]);
+    if let Err(e) = queued {
         eprintln!("queueing {full_name}: {e:#}");
     }
+}
+
+// ---------------------------------------------------------------- the manual lane
+
+#[derive(Deserialize)]
+struct Submission {
+    repo: String,
+}
+
+/// What the site says back about a submitted repo.
+pub enum Outcome {
+    /// Whatever was typed is not a repo name at all.
+    Malformed,
+    Tracking {
+        full_name: String,
+        fresh: bool,
+    },
+    Queued {
+        full_name: String,
+    },
+    /// No public repo by that name, or its maintainer opted out. One outcome for
+    /// both, because an opted-out repo must not be distinguishable from a repo
+    /// that was never there (ToS rule 4).
+    Nothing {
+        full_name: String,
+    },
+}
+
+fn submit(state: &AppState, full_name: &str, now: i64) -> Outcome {
+    let nothing = || Outcome::Nothing {
+        full_name: full_name.to_string(),
+    };
+    let tracked = {
+        let store = state.store();
+        logged(full_name, find_repo(&store.conn, full_name))
+    };
+    match tracked {
+        Some(Some(repo)) if repo.status == Status::OptedOut => nothing(),
+        // Already ours: no budget spent, nothing asked of GitHub, nothing written.
+        Some(Some(repo)) => Outcome::Tracking {
+            full_name: repo.full_name,
+            fresh: false,
+        },
+        Some(None) => match enroll(state, Lane::Manual, full_name, now) {
+            Enrollment::Started(badge) => Outcome::Tracking {
+                full_name: badge.full_name,
+                fresh: true,
+            },
+            Enrollment::Queued => Outcome::Queued {
+                full_name: full_name.to_string(),
+            },
+            Enrollment::Nothing => nothing(),
+        },
+        None => nothing(),
+    }
+}
+
+/// `owner/name`, out of whatever somebody pasted into the box: the bare name, the
+/// repo's URL, the URL of some page inside it, with or without the .git suffix.
+fn repo_name(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    let s = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
+    let s = s.strip_prefix("www.").unwrap_or(s);
+    let s = s.strip_prefix("github.com").unwrap_or(s);
+    let mut parts = s.trim_matches('/').split('/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    (valid_owner(owner) && valid_name(name)).then(|| format!("{owner}/{name}"))
 }
 
 #[cfg(test)]
@@ -581,7 +961,10 @@ mod tests {
         status: StatusCode,
         content_type: String,
         cache_control: String,
+        /// Every text response the server makes is UTF-8; the font is bytes, and
+        /// the test that cares about it compares them.
         body: String,
+        bytes: Vec<u8>,
     }
 
     fn harness(responses: Vec<(u16, String)>) -> Harness {
@@ -666,13 +1049,30 @@ mod tests {
             self.hits.load(Ordering::SeqCst)
         }
 
+        fn get(&self, uri: &str) -> Fetched {
+            self.send(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("building the request"),
+            )
+        }
+
+        /// The site's form, shaped the way a browser posts it.
+        fn post_form(&self, uri: &str, body: &str) -> Fetched {
+            self.send(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body.to_string()))
+                    .expect("building the request"),
+            )
+        }
+
         /// One runtime per request: the harness owns a blocking HTTP client, which
         /// must be built and dropped outside any async context.
-        fn get(&self, uri: &str) -> Fetched {
-            let request = Request::builder()
-                .uri(uri)
-                .body(Body::empty())
-                .expect("building the request");
+        fn send(&self, request: Request<Body>) -> Fetched {
             let app = self.app.clone();
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -698,7 +1098,8 @@ mod tests {
                         status,
                         content_type,
                         cache_control,
-                        body: String::from_utf8(body.to_vec()).expect("utf-8"),
+                        body: String::from_utf8_lossy(&body).into_owned(),
+                        bytes: body.to_vec(),
                     }
                 })
         }
@@ -886,9 +1287,11 @@ mod tests {
         )]);
         let today = date_utc(h.now);
         for _ in 0..EMBED_DAILY_BUDGET {
-            assert!(h.state.spend_enrollment(&today));
+            assert!(h.state.spend_enrollment(Lane::Embed, &today));
         }
-        assert!(!h.state.spend_enrollment(&today));
+        assert!(!h.state.spend_enrollment(Lane::Embed, &today));
+        // The lanes hold their own allowances; a busy README leaves the form alone.
+        assert!(h.state.spend_enrollment(Lane::Manual, &today));
 
         let got = h.get("/badge/owner/repo");
         assert!(got.body.contains("not tracked"), "{}", got.body);
@@ -902,7 +1305,7 @@ mod tests {
         assert_eq!(h.queued(), ["owner/repo"]);
 
         // Tomorrow the budget is whole again.
-        assert!(h.state.spend_enrollment("2099-01-01"));
+        assert!(h.state.spend_enrollment(Lane::Embed, "2099-01-01"));
     }
 
     #[test]
@@ -929,22 +1332,299 @@ mod tests {
     }
 
     #[test]
-    fn the_front_page_and_the_fallback_are_plain_text() {
+    fn the_pages_are_html_and_the_fallback_is_plain_text() {
         let h = harness(vec![]);
+        measured(&h, 1, "o/r");
 
-        let index = h.get("/");
-        assert_eq!(index.status, StatusCode::OK);
-        assert_eq!(index.content_type, "text/plain; charset=utf-8");
+        for uri in ["/", "/rankings"] {
+            let page = h.get(uri);
+            assert_eq!(page.status, StatusCode::OK, "{uri}");
+            assert_eq!(page.content_type, "text/html; charset=utf-8", "{uri}");
+            assert_eq!(page.cache_control, "public, max-age=300", "{uri}");
+            // Attribution without affiliation, on both (ToS rule 5).
+            assert!(page.body.contains("Source: GitHub public API"), "{uri}");
+            assert!(page.body.contains("not affiliated with GitHub"), "{uri}");
+            assert!(page.body.contains("snapshots through 20"), "{uri}");
+            // Server-rendered, and it stays that way.
+            assert!(!page.body.contains("<script"), "{uri}");
+        }
+
+        // The moat claim, in the wording the spec pins it to.
+        let index = h.get("/").body;
         assert!(
-            index.body.contains("/badge/{owner}/{repo}"),
-            "{}",
-            index.body
+            index.contains("only comprehensive, cross-ecosystem accumulating series"),
+            "{index}"
         );
+        assert!(index.contains(r#"action="/enroll""#), "{index}");
+        assert!(index.contains("hello@afterglow.watch"), "{index}");
+        // The badge examples are drawn for a repo that is really tracked.
+        assert!(index.contains(r#"src="/badge/o/r""#), "{index}");
+
+        // The font is ours to serve, so no third party learns who reads the page.
+        let font = h.get(FONT_URL);
+        assert_eq!(font.status, StatusCode::OK);
+        assert_eq!(font.content_type, "font/woff2");
+        assert_eq!(font.cache_control, "public, max-age=31536000, immutable");
+        assert_eq!(font.bytes, MONA_SANS);
+        assert!(index.contains(FONT_URL), "{index}");
 
         let missing = h.get("/favicon.ico");
         assert_eq!(missing.status, StatusCode::NOT_FOUND);
         assert_eq!(missing.content_type, "text/plain; charset=utf-8");
         assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
+    fn a_row_prints_the_number_the_card_prints() {
+        let h = harness(vec![]);
+        for (id, per_day) in [(1, 400), (2, 300), (3, 200), (4, 100)] {
+            h.track(id, &format!("o/r{id}"), 24 * 30, None);
+            h.snapshot(id, 24, 1_000);
+            h.snapshot(id, 0, 1_000 + per_day);
+        }
+
+        let card = h.get("/badge/o/r2?style=card").body;
+        let percentile = card
+            .split("top ")
+            .nth(1)
+            .and_then(|rest| rest.split(" velocity").next())
+            .expect("the card states a percentile");
+        assert_eq!(percentile, "50%");
+
+        let board = h.get("/rankings").body;
+        // Byte for byte the card's percentile, from the same pool and the same
+        // rounding, which is the whole reason the page exists.
+        assert!(
+            board.contains(&format!("top {percentile}</span>")),
+            "{board}"
+        );
+        assert!(board.contains(">▲ 300/day</span>"), "{board}");
+        // Ranked by the number, fastest first.
+        let rank = |name: &str| board.find(name).expect(name);
+        assert!(rank("o/r1") < rank("o/r2"));
+        assert!(rank("o/r2") < rank("o/r3"));
+        assert!(rank("o/r3") < rank("o/r4"));
+        // A measured row earns its gold: minispark, and the fade under it.
+        assert!(board.contains(r##"fill="url(#glow)""##), "{board}");
+        assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
+    fn a_slow_repo_is_on_the_board_to_be_checked_against() {
+        let h = harness(vec![]);
+        // More repos than the board ever used to print.
+        for id in 1..=130 {
+            h.track(id, &format!("o/r{id:03}"), 24 * 30, None);
+            h.snapshot(id, 24, 1_000);
+            h.snapshot(id, 0, 1_000 + (131 - id));
+        }
+
+        // Rank 110 of 130, nowhere near a leaderboard, and its card still claims a
+        // percentile that has to be checkable somewhere.
+        let card = h.get("/badge/o/r110?style=card").body;
+        let percentile = card
+            .split("top ")
+            .nth(1)
+            .and_then(|rest| rest.split(" velocity").next())
+            .expect("the card states a percentile");
+        assert_eq!(percentile, "85%");
+
+        let board = h.get("/rankings").body;
+        let row = board
+            .split(">o/r110</a>")
+            .nth(1)
+            .and_then(|rest| rest.split("c-repo").next())
+            .expect("the board prints the row");
+        assert!(row.contains(&format!("top {percentile}</span>")), "{row}");
+        // The slowest repo of all is down there too.
+        assert!(board.contains(">o/r130</a>"), "{board}");
+        assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
+    fn a_decline_keeps_the_glyph_and_loses_the_green() {
+        let h = harness(vec![]);
+        measured(&h, 1, "o/rising");
+        h.track(2, "o/falling", 24 * 30, None);
+        h.snapshot(2, 25, 5_000);
+        h.snapshot(2, 1, 4_900);
+        // Young, one reading: a lifetime average and nothing measured.
+        h.track(3, "o/young", 24, Some(24 * 10));
+        h.snapshot(3, 1, 300);
+        // Old, one reading: no honest number at all, so it has no row.
+        h.track(4, "o/quiet", 24 * 40, Some(24 * 400));
+        h.snapshot(4, 1, 5_000);
+
+        let board = h.get("/rankings").body;
+        assert!(
+            board.contains(r#"<span class="num drop">▼ 100/day</span>"#),
+            "{board}"
+        );
+        assert!(
+            board.contains(r#"<span class="num gain">▲ 100/day</span>"#),
+            "{board}"
+        );
+        // Proxy rows interleave on their number, muted, with no percentile and no
+        // spark: glow is earned.
+        assert!(
+            board.contains(r#"<span class="num proxy">~30 avg</span>"#),
+            "{board}"
+        );
+        assert!(!board.contains("o/quiet"), "{board}");
+    }
+
+    #[test]
+    fn an_opted_out_repo_reads_as_never_tracked() {
+        let h = harness(vec![]);
+        measured(&h, 1, "o/kept");
+        h.track_as(2, "o/gone", 24 * 30, None, "opted_out");
+        h.snapshot(2, 25, 1_000);
+        h.snapshot(2, 1, 99_000);
+
+        // Not paused: paused says we are still watching and cannot see.
+        for uri in ["/badge/o/gone", "/badge/o/gone?style=card"] {
+            let badge = h.get(uri);
+            assert!(badge.body.contains("not tracked"), "{uri}: {}", badge.body);
+            assert!(!badge.body.contains("tracking paused"), "{uri}");
+            assert_eq!(badge.cache_control, "public, max-age=300", "{uri}");
+        }
+
+        // Gone from the board, and gone from the pool the percentile is against.
+        let board = h.get("/rankings").body;
+        assert!(!board.contains("o/gone"), "{board}");
+        assert!(board.contains("o/kept"), "{board}");
+        assert!(h.get("/badge/o/kept?style=card").body.contains("top 100%"));
+
+        // The series it already has stays where it is.
+        assert_eq!(
+            h.scalar("SELECT COUNT(*) FROM snapshots WHERE repo_id = 2"),
+            2
+        );
+        assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
+    fn the_form_enrolls_once_and_then_has_nothing_to_do() {
+        let created = iso8601_utc(now_unix() - 400 * 24 * HOUR);
+        let h = harness(vec![(200, repo_json(42, "Owner/Repo", 1_234, &created))]);
+
+        let first = h.post_form("/enroll", "repo=https%3A%2F%2Fgithub.com%2Fowner%2Frepo");
+        assert_eq!(first.status, StatusCode::OK);
+        assert_eq!(first.content_type, "text/html; charset=utf-8");
+        // One submission, one answer, belonging to nobody else.
+        assert_eq!(first.cache_control, "no-store");
+        assert!(first.body.contains("Tracking Owner/Repo"), "{}", first.body);
+        assert_eq!(h.calls(), 1);
+        assert_eq!(
+            h.scalar("SELECT COUNT(*) FROM repos WHERE lane = 'manual'"),
+            1
+        );
+        assert_eq!(
+            h.scalar("SELECT stars FROM snapshots WHERE repo_id = 42"),
+            1_234
+        );
+
+        // Submitting it again costs nothing: no call, no row, no second budget.
+        let again = h.post_form("/enroll", "repo=owner%2Frepo");
+        assert!(again.body.contains("is already tracked"), "{}", again.body);
+        assert_eq!(h.calls(), 1);
+        assert_eq!(h.scalar("SELECT COUNT(*) FROM repos"), 1);
+        assert_eq!(h.scalar("SELECT COUNT(*) FROM snapshots"), 1);
+
+        // Junk in the box is answered, not enrolled.
+        let junk = h.post_form("/enroll", "repo=not+a+repo");
+        assert!(junk.body.contains("not a repo name"), "{}", junk.body);
+        assert_eq!(junk.cache_control, "no-store");
+        assert_eq!(h.calls(), 1);
+    }
+
+    #[test]
+    fn a_spent_manual_budget_queues_the_submission() {
+        let h = harness(vec![(
+            200,
+            repo_json(42, "owner/repo", 5, "2026-01-01T00:00:00Z"),
+        )]);
+        let today = date_utc(h.now);
+        for _ in 0..MANUAL_DAILY_BUDGET {
+            assert!(h.state.spend_enrollment(Lane::Manual, &today));
+        }
+
+        let got = h.post_form("/enroll", "repo=owner/repo");
+        assert!(got.body.contains("is queued"), "{}", got.body);
+        assert!(got.body.contains("nothing is dropped"), "{}", got.body);
+        assert_eq!(h.queued(), ["owner/repo"]);
+        // Which lane asked rides along, so the drain can record it on the repo.
+        assert_eq!(
+            h.scalar("SELECT COUNT(*) FROM enroll_queue WHERE lane = 'manual'"),
+            1
+        );
+        assert_eq!(h.scalar("SELECT COUNT(*) FROM repos"), 0);
+        assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
+    fn the_form_will_not_re_enroll_a_repo_that_opted_out() {
+        let h = harness(vec![]);
+        h.track_as(7, "o/gone", 24 * 30, None, "opted_out");
+
+        let got = h.post_form("/enroll", "repo=o/gone");
+        // The same answer an unknown repo gets: opting out is not a status anyone
+        // can read off the site.
+        assert!(got.body.contains("Nothing to track for"), "{}", got.body);
+        assert_eq!(
+            h.scalar("SELECT COUNT(*) FROM repos WHERE status = 'opted_out'"),
+            1
+        );
+        assert_eq!(h.calls(), 0);
+        assert_eq!(h.scalar("SELECT COUNT(*) FROM enroll_queue"), 0);
+    }
+
+    /// A rename is the one way an opted-out repo reaches the enrol path at all:
+    /// the store's name is stale, so only the numeric id gives it away.
+    #[test]
+    fn a_renamed_opt_out_is_caught_by_its_id() {
+        let h = harness(vec![(
+            200,
+            repo_json(7, "o/renamed", 900, "2026-01-01T00:00:00Z"),
+        )]);
+        h.track_as(7, "o/old-name", 24 * 30, None, "opted_out");
+
+        let got = h.get("/badge/o/renamed");
+        assert!(got.body.contains("not tracked"), "{}", got.body);
+        assert_eq!(h.calls(), 1);
+        // Asked about, and still not written down.
+        assert_eq!(h.scalar("SELECT COUNT(*) FROM snapshots"), 0);
+        assert_eq!(
+            h.scalar("SELECT COUNT(*) FROM repos WHERE full_name = 'o/old-name'"),
+            1
+        );
+    }
+
+    #[test]
+    fn a_pasted_url_is_still_a_repo_name() {
+        for raw in [
+            "owner/repo",
+            "  owner/repo  ",
+            "owner/repo/",
+            "https://github.com/owner/repo",
+            "http://github.com/owner/repo",
+            "https://www.github.com/owner/repo.git",
+            "github.com/owner/repo",
+            "https://github.com/owner/repo/tree/main",
+        ] {
+            assert_eq!(repo_name(raw).as_deref(), Some("owner/repo"), "{raw}");
+        }
+        for raw in [
+            "",
+            "owner",
+            "owner/",
+            "/repo",
+            "not a repo",
+            "o/a$b",
+            "https://github.com/",
+        ] {
+            assert_eq!(repo_name(raw), None, "{raw}");
+        }
     }
 
     #[test]

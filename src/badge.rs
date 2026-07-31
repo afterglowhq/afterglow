@@ -7,8 +7,8 @@
 
 use crate::widths::{HELVETICA_BOLD_20, VERDANA_11, VERDANA_11_KERN};
 
-/// Octicon `star-fill`, unmodified.
-const STAR: &str = "M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z";
+/// Octicon `star-fill`, unmodified. The leaderboard draws the same glyph.
+pub const STAR: &str = "M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z";
 
 const AMBER: &str = "#d4a72c";
 const PROXY_GREY: &str = "#9f9f9f";
@@ -106,7 +106,7 @@ pub fn pill(b: &RepoBadge) -> String {
             format!("afterglow: {count} stars, {}", gain_phrase(velocity)),
         ),
         BadgeState::Proxy { avg } => (
-            format!("~{} avg", commas(avg)),
+            proxy_avg(avg),
             PROXY_GREY,
             format!(
                 "afterglow: {count} stars, about {} per day lifetime average (proxy)",
@@ -182,7 +182,7 @@ pub fn card(b: &RepoBadge, theme: Theme) -> String {
             ),
             repo: &repo,
             name_fill: t.accent,
-            nums: nums_row(&count, &format!("~{} avg", commas(avg)), t.muted, "600", t),
+            nums: nums_row(&count, &proxy_avg(avg), t.muted, "600", t),
             pct: pct_el(MEASURING, t),
             spark: dashed(t),
             footer: footer_el(&format!("tracked since {since}"), "400", t),
@@ -245,7 +245,11 @@ pub fn not_tracked_card(full_name: &str, theme: Theme) -> String {
 }
 
 /// Direction changes the glyph, never the colour: measured is measured.
-fn delta(v: i64) -> String {
+///
+/// This and the three formatters under it are the only place a displayed number
+/// becomes text. The leaderboard calls them too, so a row and a card cannot
+/// disagree by a rounding step about the same repo.
+pub fn delta(v: i64) -> String {
     format!(
         "{} {}/day",
         if v < 0 { "▼" } else { "▲" },
@@ -261,8 +265,13 @@ fn gain_phrase(v: i64) -> String {
     )
 }
 
+/// The lifetime average, wearing the mark that says it was never measured.
+pub fn proxy_avg(avg: i64) -> String {
+    format!("~{} avg", commas(avg))
+}
+
 /// Sub-1% percentiles keep a decimal and never round down to a bare 0.
-fn percent(p: f64) -> String {
+pub fn percent(p: f64) -> String {
     if p >= 1.0 {
         return round_int(p).to_string();
     }
@@ -274,7 +283,7 @@ fn percent(p: f64) -> String {
     }
 }
 
-fn commas(n: i64) -> String {
+pub fn commas(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = if n < 0 {
         "-".to_string()
@@ -434,7 +443,7 @@ fn dashed(t: &Palette) -> String {
 }
 
 /// Whole coordinates print bare, the rest keep their one decimal.
-fn coord(v: f64) -> String {
+pub fn coord(v: f64) -> String {
     let r = round1(v);
     if r.fract() == 0.0 {
         format!("{r:.0}")
