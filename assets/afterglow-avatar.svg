@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Afterglow avatar: sparkline rising into an octicon star through its bottom notch">
+  <defs>
+    <linearGradient id="g3" x1="0" y1="211" x2="0" y2="430" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e3b341" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#e3b341" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="#0d1117"/>
+  <!-- glow: extends to the line's cap on the left, concludes at the x of the star's
+       most down-facing leg tip on the right, passing behind the star -->
+  <path d="M93 344 L104 344 L184 312 L248 328 L358 211 L358 430 L93 430 Z" fill="url(#g3)"/>
+  <path d="M104 344 L184 312 L248 328 L328 243" fill="none" stroke="#e3b341" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- octicon star-fill-16, unmodified, rotated 43.2° so the top point continues the
+       line's trajectory and the bottom notch receives the line between the two legs -->
+  <g transform="translate(368,200) rotate(43.2) scale(8) translate(-8,-7.6)">
+    <path fill="#e3b341" d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/>
+  </g>
+</svg>

@@ -91,6 +91,9 @@ pre {
   border-bottom: 1px solid var(--border);
 }
 .wordmark { font-size: 1.125rem; color: var(--fg); }
+.mark { height: 1.25rem; width: auto; margin-right: 8px; vertical-align: -0.3em; }
+.mark .line { fill: none; stroke: var(--spark); stroke-width: 22; stroke-linecap: round; stroke-linejoin: round; }
+.mark .glyph { fill: var(--gold); }
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 stop { stop-color: var(--spark); }
 .row {
@@ -373,13 +376,26 @@ fn shell(title: &str, here: &str, body: Markup, through: Option<&str>) -> Markup
                 (sprite())
                 .page {
                     header.masthead {
-                        a.wordmark href="/" aria-current=[current("/")] { "afterglow" }
+                        a.wordmark href="/" aria-current=[current("/")] { (mark()) "afterglow" }
                         nav { a href="/rankings" aria-current=[current("/rankings")] { "rankings" } }
                     }
                     main { (body) }
                     (attribution(through))
                 }
             }
+        }
+    }
+}
+
+/// The identity mark: the sparkline rising into the star
+/// through its bottom notch. Same geometry as assets/afterglow-avatar.svg, minus
+/// the canvas, themed via --gold/--spark and the shared #glow gradient.
+fn mark() -> Markup {
+    html! {
+        svg.mark viewBox="93 155 325 265" aria-hidden="true" {
+            path.fade d="M93 344 L104 344 L184 312 L248 328 L358 211 L358 430 L93 430 Z" fill="url(#glow)" {}
+            path.line d="M104 344 L184 312 L248 328 L328 243" {}
+            g transform="translate(368,200) rotate(43.2) scale(8) translate(-8,-7.6)" { path.glyph d=(STAR) {} }
         }
     }
 }
