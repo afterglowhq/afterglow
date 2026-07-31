@@ -133,7 +133,7 @@ SELECT ts, stars FROM snapshots WHERE repo_id = ?1 AND ts >= ?2 ORDER BY ts";
 /// The fleet's recent readings in one pass. `status = 'active'` is what keeps an
 /// opted-out repo out of both the percentile pool and the leaderboard.
 const RECENT_SNAPSHOTS: &str = "\
-SELECT s.repo_id, r.full_name, r.created_at, s.ts, s.stars
+SELECT s.repo_id, r.full_name, r.created_at, r.language, s.ts, s.stars
 FROM snapshots s JOIN repos r ON r.id = s.repo_id
 WHERE r.status = 'active' AND s.ts >= ?1
 ORDER BY s.repo_id, s.ts";
@@ -725,6 +725,7 @@ struct Series {
     id: i64,
     full_name: String,
     created_at: Option<String>,
+    language: Option<String>,
     readings: Vec<Reading>,
 }
 
@@ -744,8 +745,8 @@ fn recent_series(conn: &Connection, now: i64) -> Result<Vec<Series>> {
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
         let reading = Reading {
-            ts: row.get(3)?,
-            stars: row.get(4)?,
+            ts: row.get(4)?,
+            stars: row.get(5)?,
         };
         match out.last_mut() {
             Some(series) if series.id == id => series.readings.push(reading),
@@ -753,6 +754,7 @@ fn recent_series(conn: &Connection, now: i64) -> Result<Vec<Series>> {
                 id,
                 full_name: row.get(1)?,
                 created_at: row.get(2)?,
+                language: row.get(3)?,
                 readings: vec![reading],
             }),
         }
@@ -859,6 +861,8 @@ pub struct Board {
 
 pub struct BoardRow {
     pub full_name: String,
+    /// Linguist's call at last sight; None renders as nothing.
+    pub language: Option<String>,
     pub stars: i64,
     pub velocity: RowVelocity,
     /// Points in `MINI_SPARK`; measured rows only, because glow is earned.
@@ -920,6 +924,7 @@ fn board(conn: &Connection, now: i64) -> Result<Board> {
         };
         rows.push(BoardRow {
             full_name: s.full_name.clone(),
+            language: s.language.clone(),
             stars: latest.stars,
             velocity,
             spark,
@@ -1857,6 +1862,38 @@ mod tests {
             );
             assert_eq!(row_of(&velocity.body, name), row_of(&stars.body, name));
         }
+        assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
+    fn the_language_is_on_the_row_when_github_has_named_one() {
+        let h = harness(vec![]);
+        measured(&h, 1, "o/coded");
+        measured(&h, 2, "o/prose");
+        measured(&h, 3, "o/obscure");
+        for (id, language) in [(1, "Rust"), (3, "Fable")] {
+            h.state
+                .store()
+                .conn
+                .execute(
+                    "UPDATE repos SET language = ?2 WHERE id = ?1",
+                    params![id, language],
+                )
+                .expect("naming a language");
+        }
+
+        let board = h.get("/rankings").body;
+        // The dot wears Linguist's hex for the language, then the muted name.
+        let coded = row_of(&board, "o/coded");
+        assert!(coded.contains(r##"fill="#dea584""##), "{coded}");
+        assert!(coded.contains(">Rust</span>"), "{coded}");
+        // A language Linguist has no color for still gets its name, on the
+        // neutral dot.
+        let obscure = row_of(&board, "o/obscure");
+        assert!(obscure.contains(r#"fill="var(--border)""#), "{obscure}");
+        assert!(obscure.contains(">Fable</span>"), "{obscure}");
+        // No verdict, no claim: the cell ends at the repo name.
+        assert!(!row_of(&board, "o/prose").contains("c-lang"), "{board}");
         assert_eq!(h.calls(), 0);
     }
 

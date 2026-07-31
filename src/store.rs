@@ -9,6 +9,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/001-store.sql"),
     include_str!("migrations/002-enroll-queue.sql"),
     include_str!("migrations/003-opt-out.sql"),
+    include_str!("migrations/004-language.sql"),
 ];
 
 /// `enrolled_at` only ever moves earlier: it is the first sight, and importing
@@ -41,6 +42,11 @@ pub const DEQUEUE_ENROLLMENT: &str = "DELETE FROM enroll_queue WHERE full_name =
 
 /// Series are retained when a repo goes away; only the badge changes.
 pub const MARK_INACTIVE: &str = "UPDATE repos SET status = 'inactive' WHERE id = ?1";
+
+/// The newest verdict wins, NULL included: a repo whose detectable code goes away
+/// stops claiming a language. Kept out of UPSERT_REPO so the import path, which
+/// never asked GitHub, cannot blank what a real request observed.
+pub const SET_LANGUAGE: &str = "UPDATE repos SET language = ?2 WHERE id = ?1";
 
 const REPO_BY_NAME_NOCASE: &str = "\
 SELECT id, full_name FROM repos WHERE full_name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1";
@@ -96,6 +102,7 @@ pub fn record_repo(conn: &Connection, repo: &Repo, lane: &str, ts: &str) -> Resu
         UPSERT_REPO,
         params![repo.id, repo.full_name, lane, ts, repo.created_at],
     )?;
+    conn.execute(SET_LANGUAGE, params![repo.id, repo.language])?;
     Ok(conn.execute(
         APPEND_SNAPSHOT,
         params![
@@ -400,6 +407,43 @@ mod tests {
         // A name we do not have is an error, not a quiet success.
         let err = opt_out(&store, "who/knows", false).unwrap_err().to_string();
         assert!(err.contains("not tracked"), "{err}");
+    }
+
+    #[test]
+    fn the_language_follows_the_newest_verdict_even_to_null() {
+        let store = Store::open_in_memory().unwrap();
+        let repo = |language: Option<&str>| Repo {
+            id: 1,
+            full_name: "a/b".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            stargazers_count: 10,
+            forks_count: None,
+            open_issues_count: None,
+            subscribers_count: None,
+            pushed_at: None,
+            language: language.map(str::to_string),
+        };
+        let language = || -> Option<String> {
+            store
+                .conn
+                .query_row("SELECT language FROM repos WHERE id = 1", [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+
+        record_repo(
+            &store.conn,
+            &repo(Some("Shell")),
+            "scan",
+            "2026-07-30T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(language().as_deref(), Some("Shell"));
+
+        // The last script left the repo and GitHub now says nothing. So do we.
+        record_repo(&store.conn, &repo(None), "scan", "2026-07-31T00:00:00Z").unwrap();
+        assert_eq!(language(), None);
     }
 
     #[test]

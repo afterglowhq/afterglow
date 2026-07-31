@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 mod badge;
 mod github;
 mod import;
+mod language;
 mod serve;
 mod site;
 mod snapshot;

@@ -7,8 +7,8 @@ use crate::github::{GitHub, SearchItem};
 use crate::plural;
 use crate::serve::{EMBED_DAILY_BUDGET, MANUAL_DAILY_BUDGET};
 use crate::store::{
-    APPEND_SNAPSHOT, DEQUEUE_ENROLLMENT, MARK_INACTIVE, QUEUED_ENROLLMENTS, Store, UPSERT_REPO,
-    opted_out, record_repo,
+    APPEND_SNAPSHOT, DEQUEUE_ENROLLMENT, MARK_INACTIVE, QUEUED_ENROLLMENTS, SET_LANGUAGE, Store,
+    UPSERT_REPO, opted_out, record_repo,
 };
 use crate::time::{SECONDS_PER_DAY, date_utc, iso8601_utc, now_unix};
 
@@ -43,6 +43,7 @@ pub fn run(store: &mut Store, gh: &GitHub) -> Result<()> {
     {
         let mut upsert = tx.prepare(UPSERT_REPO)?;
         let mut append = tx.prepare(APPEND_SNAPSHOT)?;
+        let mut set_language = tx.prepare(SET_LANGUAGE)?;
         for it in &items {
             // The search does not know who asked to be left alone (ToS rule 4).
             if opted_out(&tx, it.id)? {
@@ -50,6 +51,7 @@ pub fn run(store: &mut Store, gh: &GitHub) -> Result<()> {
                 continue;
             }
             upsert.execute(params![it.id, it.full_name, "scan", ts, it.created_at])?;
+            set_language.execute(params![it.id, it.language])?;
             appended += append.execute(params![
                 it.id,
                 ts,
@@ -276,6 +278,10 @@ mod tests {
             scalar::<i64>(&s, "SELECT subscribers FROM snapshots WHERE repo_id = 1"),
             5
         );
+        assert_eq!(
+            scalar::<String>(&s, "SELECT language FROM repos WHERE id = 1"),
+            "Rust"
+        );
     }
 
     #[test]
@@ -353,6 +359,11 @@ mod tests {
         assert_eq!(
             scalar::<i64>(&s, "SELECT COUNT(*) FROM snapshots WHERE repo_id = 1"),
             1
+        );
+        // Search items carry the language too, so the scan lane sets it for free.
+        assert_eq!(
+            scalar::<String>(&s, "SELECT language FROM repos WHERE id = 1"),
+            "Rust"
         );
     }
 

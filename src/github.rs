@@ -29,6 +29,8 @@ pub struct Repo {
     pub subscribers_count: Option<i64>,
     #[serde(default)]
     pub pushed_at: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,6 +45,8 @@ pub struct SearchItem {
     pub open_issues_count: i64,
     #[serde(default)]
     pub pushed_at: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -217,7 +221,7 @@ pub fn stub(
 #[cfg(test)]
 pub fn repo_json(id: i64, full_name: &str, stars: i64, created_at: &str) -> String {
     format!(
-        r#"{{"id":{id},"full_name":"{full_name}","created_at":"{created_at}","stargazers_count":{stars},"forks_count":3,"open_issues_count":4,"subscribers_count":5,"pushed_at":"{created_at}"}}"#
+        r#"{{"id":{id},"full_name":"{full_name}","created_at":"{created_at}","stargazers_count":{stars},"forks_count":3,"open_issues_count":4,"subscribers_count":5,"pushed_at":"{created_at}","language":"Rust"}}"#
     )
 }
 
@@ -287,6 +291,7 @@ mod tests {
         assert_eq!((repo.id, repo.stargazers_count), (9, 12));
         assert_eq!(repo.subscribers_count, Some(5));
         assert_eq!(repo.pushed_at.as_deref(), Some("2026-01-02T03:04:05Z"));
+        assert_eq!(repo.language.as_deref(), Some("Rust"));
         assert!(gh.repo("a/b").unwrap().is_none());
         // Out of canned responses: the call is seen and then refused, never hung.
         assert!(gh.repo("a/b").is_err());

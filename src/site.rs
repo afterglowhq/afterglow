@@ -7,6 +7,7 @@
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 
 use crate::badge::{self, STAR};
+use crate::language;
 use crate::serve::{
     Board, BoardRow, FONT_URL, ICON_PNG_URL, ICON_SVG_URL, MINI_SPARK, MINI_SPARK_HEIGHT, Outcome,
     RowVelocity, Sort, TOUCH_ICON_URL,
@@ -137,6 +138,8 @@ stop { stop-color: var(--spark); }
 }
 .num { text-align: right; font-variant-numeric: tabular-nums lining-nums; }
 .c-repo { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.c-lang { color: var(--muted); font-size: 0.8125rem; margin-left: 8px; white-space: nowrap; }
+.c-lang .dot { width: 8px; height: 8px; margin-right: 4px; }
 .c-stars { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
 .star { width: 12px; height: 12px; fill: var(--gold); flex: none; }
 .gain { color: var(--green); font-weight: 600; }
@@ -183,7 +186,7 @@ button:hover { border-color: var(--fg); }
 @media (max-width: 40rem) {
   h1 { font-size: 1.625rem; }
   .row { grid-template-columns: 1.75rem minmax(0, 1fr) 4.75rem 6.25rem; gap: 8px; }
-  .c-spark, .c-pct { display: none; }
+  .c-spark, .c-pct, .c-lang { display: none; }
 }
 "#;
 
@@ -338,6 +341,12 @@ pub fn rankings(board: &Board, sort: Sort) -> Markup {
                 "Ranks move week to week. The badge never prints one, because a number that "
                 "swings is a number we would end up retracting."
             }
+            p.note {
+                "The language next to a repo is GitHub's call, and GitHub does not count "
+                "Markdown. A mostly-Markdown repo shows whatever scripts are left, or nothing. "
+                "Putting " code { "*.md linguist-detectable" } " in its " code { ".gitattributes" }
+                " makes Markdown count, here and on the repo's own page."
+            }
         }
     };
     shell(
@@ -465,7 +474,22 @@ fn sprite() -> Markup {
 
 fn board_row(row: &BoardRow) -> Markup {
     html! {
-        a.c-repo href=(format!("https://github.com/{}", row.full_name)) { (row.full_name) }
+        span.c-repo {
+            a href=(format!("https://github.com/{}", row.full_name)) { (row.full_name) }
+            // GitHub's call, not ours, and it shares the repo cell rather than
+            // taking a column: information, never an ordering. The dot wears the
+            // hex Linguist gives the language, the same one GitHub's bar shows;
+            // fill is an attribute, so the CSP never notices.
+            @if let Some(name) = &row.language {
+                span.c-lang {
+                    svg.dot aria-hidden="true" viewBox="0 0 8 8" {
+                        circle cx="4" cy="4" r="4"
+                            fill=(language::color(name).unwrap_or("var(--border)")) {}
+                    }
+                    (name)
+                }
+            }
+        }
         (minispark(&row.spark))
         // Every unit on the row is drawn as a glyph or a column header, which a
         // screen reader reading one cell has neither of. The sr-only words are
