@@ -14,6 +14,7 @@ use axum::Router;
 use axum::extract::rejection::{FormRejection, QueryRejection};
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
+use axum::middleware::map_response;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum_server::tls_rustls::RustlsConfig;
@@ -95,6 +96,20 @@ pub const ICON_PNG_URL: &str = "/static/favicon-96.png";
 pub const TOUCH_ICON_URL: &str = "/static/apple-touch-icon.png";
 /// A tab icon moves when the brand does, which is not on any schedule.
 const ICON_CACHE: &str = "public, max-age=86400";
+
+/// Two years of HTTPS-only, and deliberately no `preload` token: that token is a
+/// claim that the domain is submitted to the browser preload list, and it is not.
+const HSTS: &str = "max-age=63072000; includeSubDomains";
+
+/// What a page actually loads: its own images, its own font, the stylesheet that
+/// ships inline in a `<style>` element, and a form that posts back to us. No
+/// script anywhere, so `default-src 'none'` is the floor everything else sits on.
+const PAGE_CSP: &str = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; \
+     font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+
+/// Everything else we serve fetches nothing: the badge SVGs carry no `<style>`
+/// element and no `style` attribute, and the font, the icons and the 404 are bytes.
+const STRICT_CSP: &str = "default-src 'none'";
 
 const NOT_FOUND: &str = "Nothing here. Badges are at /badge/{owner}/{repo}.\n";
 
@@ -259,7 +274,44 @@ fn router(state: Arc<AppState>) -> Router {
             get(|| async { icon(TOUCH_ICON, "image/png") }),
         )
         .fallback(missing)
+        .layer(map_response(secure))
         .with_state(state)
+}
+
+/// The security headers, on everything the router answers with.
+///
+/// At the origin rather than at the edge, so they travel with the app, survive a
+/// CDN change, and can be held to by a test. Only the CSP and the framing rule
+/// differ by kind, and both read the content type the handler already set.
+async fn secure(mut response: Response) -> Response {
+    let page = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|kind| kind.as_bytes().starts_with(b"text/html"));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::STRICT_TRANSPORT_SECURITY,
+        HeaderValue::from_static(HSTS),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(if page { PAGE_CSP } else { STRICT_CSP }),
+    );
+    if page {
+        // Pages only. A badge is embedded cross-origin as an image by design, and
+        // while this header does not govern `<img>`, keeping it off that path
+        // leaves nothing to wonder about.
+        headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    }
+    response
 }
 
 #[derive(Clone, Copy)]
@@ -382,11 +434,12 @@ async fn compat_badge(
     query: Result<Query<HashMap<String, String>>, QueryRejection>,
 ) -> Response {
     let q = query.map(|Query(q)| q).unwrap_or_default();
+    // An empty entry is not the repo anybody meant, so a leading comma falls
+    // through to the next one rather than drawing a badge about nothing.
     let first = q
         .get("repos")
-        .and_then(|repos| repos.split(',').next())
+        .and_then(|repos| repos.split(',').map(str::trim).find(|r| !r.is_empty()))
         .unwrap_or_default()
-        .trim()
         .to_string();
     render(state, &first, Shape::Card(theme_of(&q))).await
 }
@@ -409,13 +462,41 @@ async fn render(state: Arc<AppState>, full_name: &str, shape: Shape) -> Response
         eprintln!("badge {name}: {e}");
         None
     });
+    // A tracked repo's name came back from GitHub and is already legal; the one in
+    // the URL is whatever was typed at us, and only the untracked badge prints it.
+    let shown = display_name(&name);
     let (svg, max_age) = match (&badge, shape) {
         (Some(b), Shape::Pill) => (badge::pill(b), max_age_for(b.state)),
         (Some(b), Shape::Card(theme)) => (badge::card(b, theme), max_age_for(b.state)),
-        (None, Shape::Pill) => (badge::not_tracked_pill(&name), FRESH_MAX_AGE),
-        (None, Shape::Card(theme)) => (badge::not_tracked_card(&name, theme), FRESH_MAX_AGE),
+        (None, Shape::Pill) => (badge::not_tracked_pill(&shown), FRESH_MAX_AGE),
+        (None, Shape::Card(theme)) => (badge::not_tracked_card(&shown, theme), FRESH_MAX_AGE),
     };
     svg_response(svg, max_age)
+}
+
+/// GitHub's charset, applied to a name we are about to print rather than look up.
+///
+/// `resolve` refuses an illegal name before it reaches GitHub or the store, but
+/// the refused name still reaches the SVG, and a URL can carry bidi controls or
+/// C0 bytes that reorder the line they land in. Escaping keeps the markup intact;
+/// this keeps the display intact. A merely wrong ASCII name survives unchanged,
+/// because reading it back is how a maintainer finds the typo.
+fn display_name(full_name: &str) -> String {
+    let keep = |s: &str, extra: &str| -> String {
+        s.chars()
+            .filter(|&c| c.is_ascii_alphanumeric() || extra.contains(c))
+            .collect()
+    };
+    // No separator means there is no owner segment to tell apart, so what is left
+    // is held to the looser of the two charsets.
+    let (owner, name) = full_name.split_once('/').unwrap_or(("", full_name));
+    let (owner, name) = (keep(owner, "-"), keep(name, "-._"));
+    if owner.is_empty() || name.is_empty() {
+        // One empty segment leaves no separator behind, and two leave nothing.
+        owner + &name
+    } else {
+        format!("{owner}/{name}")
+    }
 }
 
 fn max_age_for(state: BadgeState) -> u32 {
@@ -1002,7 +1083,7 @@ mod tests {
     use super::*;
     use crate::github::{repo_json, stub};
     use axum::body::{Body, to_bytes};
-    use axum::http::Request;
+    use axum::http::{HeaderMap, Request};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt;
 
@@ -1019,10 +1100,22 @@ mod tests {
         status: StatusCode,
         content_type: String,
         cache_control: String,
+        headers: HeaderMap,
         /// Every text response the server makes is UTF-8; the font is bytes, and
         /// the test that cares about it compares them.
         body: String,
         bytes: Vec<u8>,
+    }
+
+    impl Fetched {
+        /// A header by name, or the empty string for one that is not there, so a
+        /// test can state both what is set and what deliberately is not.
+        fn header(&self, name: &str) -> &str {
+            self.headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+        }
     }
 
     fn harness(responses: Vec<(u16, String)>) -> Harness {
@@ -1139,9 +1232,9 @@ mod tests {
                 .block_on(async move {
                     let response = app.oneshot(request).await.expect("the router answers");
                     let status = response.status();
+                    let headers = response.headers().clone();
                     let head = |name: &str| {
-                        response
-                            .headers()
+                        headers
                             .get(name)
                             .and_then(|v| v.to_str().ok())
                             .unwrap_or_default()
@@ -1156,6 +1249,7 @@ mod tests {
                         status,
                         content_type,
                         cache_control,
+                        headers,
                         body: String::from_utf8_lossy(&body).into_owned(),
                         bytes: body.to_vec(),
                     }
@@ -1332,6 +1426,82 @@ mod tests {
         assert_eq!(h.scalar("SELECT COUNT(*) FROM repos"), 0);
     }
 
+    /// The sentence a badge speaks, which is also the one its `<title>` carries.
+    fn aria_of(svg: &str) -> &str {
+        svg.split(r#"aria-label=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("every badge states an aria-label")
+    }
+
+    #[test]
+    fn an_untracked_name_prints_only_what_github_allows() {
+        let h = harness(vec![]);
+        // U+202E reorders everything after it; U+0001 is a control byte a terminal
+        // or a reader may do anything at all with. Both arrive through the path and
+        // through the compat query, and neither belongs in a rendered line.
+        for uri in [
+            "/badge/o%E2%80%AEwner/repo",
+            "/badge/o%E2%80%AEwner/repo?style=card",
+            "/badge/owner/re%01po?style=card",
+            "/svg?repos=o%E2%80%AEwner/re%01po",
+        ] {
+            let got = h.get(uri);
+            assert_eq!(got.status, StatusCode::OK, "{uri}");
+            assert!(got.body.contains("not tracked"), "{uri}: {}", got.body);
+            assert!(!got.body.contains('\u{202e}'), "{uri}: {}", got.body);
+            assert!(!got.body.contains('\u{1}'), "{uri}: {}", got.body);
+            // The aria-label and the title carry the same sentence, so both are
+            // checked rather than trusting one to stand for the other.
+            assert_eq!(aria_of(&got.body), "afterglow: owner/repo is not tracked");
+            assert!(
+                got.body
+                    .contains("<title>afterglow: owner/repo is not tracked</title>"),
+                "{uri}: {}",
+                got.body
+            );
+        }
+
+        // A name that is only wrong prints exactly as it was asked for, because
+        // reading it back is how a maintainer finds the typo. This one is refused
+        // for its length, so nothing about it reaches GitHub either.
+        let long = "a".repeat(40);
+        let got = h.get(&format!("/badge/{long}/clim_dg.rs"));
+        assert_eq!(
+            aria_of(&got.body),
+            format!("afterglow: {long}/clim_dg.rs is not tracked")
+        );
+        assert_eq!(h.calls(), 0);
+        assert_eq!(h.scalar("SELECT COUNT(*) FROM repos"), 0);
+    }
+
+    #[test]
+    fn an_empty_repo_token_leaves_no_hole_in_the_badge() {
+        let h = harness(vec![]);
+        measured(&h, 1, "o/r");
+
+        // Nothing named at all: still a badge, and one without a gap in its line.
+        for uri in ["/svg?repos=", "/svg?repos=,", "/svg?repos=%20"] {
+            let got = h.get(uri);
+            assert_eq!(got.status, StatusCode::OK, "{uri}");
+            assert!(got.body.contains("not tracked"), "{uri}: {}", got.body);
+            assert_eq!(aria_of(&got.body), "afterglow: not tracked", "{uri}");
+            assert!(
+                got.body.contains("<title>afterglow: not tracked</title>"),
+                "{uri}: {}",
+                got.body
+            );
+        }
+
+        // An empty owner segment leaves no separator behind either.
+        let got = h.get("/badge//climdg");
+        assert_eq!(aria_of(&got.body), "afterglow: climdg is not tracked");
+
+        let got = h.get("/svg?repos=,o/r");
+        assert!(got.body.contains(">o/r<"), "{}", got.body);
+        assert_eq!(h.calls(), 0);
+    }
+
     #[test]
     fn a_first_request_enrolls_and_the_next_comes_from_the_store() {
         let created = iso8601_utc(now_unix() - 400 * 24 * HOUR);
@@ -1457,6 +1627,61 @@ mod tests {
         let missing = h.get("/favicon.ico");
         assert_eq!(missing.status, StatusCode::NOT_FOUND);
         assert_eq!(missing.content_type, "text/plain; charset=utf-8");
+        assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
+    fn every_response_carries_its_security_headers() {
+        let h = harness(vec![]);
+        measured(&h, 1, "o/r");
+
+        let pages = ["/", "/rankings"];
+        let badges = ["/badge/o/r", "/badge/o/r?style=card", "/svg?repos=o/r"];
+        let rest = [FONT_URL, ICON_SVG_URL, ICON_PNG_URL, "/nowhere"];
+        for uri in pages.iter().chain(&badges).chain(&rest) {
+            let got = h.get(uri);
+            assert_eq!(got.header("x-content-type-options"), "nosniff", "{uri}");
+            assert_eq!(got.header("referrer-policy"), "no-referrer", "{uri}");
+            assert_eq!(
+                got.header("strict-transport-security"),
+                "max-age=63072000; includeSubDomains",
+                "{uri}"
+            );
+        }
+
+        for uri in pages {
+            let page = h.get(uri);
+            assert_eq!(
+                page.header("content-security-policy"),
+                "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; \
+                 font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+                "{uri}"
+            );
+            assert_eq!(page.header("x-frame-options"), "DENY", "{uri}");
+        }
+        // The form's answer is a page too, however short-lived.
+        let form = h.post_form("/enroll", "repo=not+a+repo");
+        assert_eq!(form.header("x-frame-options"), "DENY");
+        assert_eq!(form.header("x-content-type-options"), "nosniff");
+
+        for uri in badges {
+            let badge = h.get(uri);
+            assert_eq!(
+                badge.header("content-security-policy"),
+                "default-src 'none'",
+                "{uri}"
+            );
+            // Not on a badge: a README embeds it cross-origin as an image on
+            // purpose, and the header has no business anywhere near that.
+            assert_eq!(badge.header("x-frame-options"), "", "{uri}");
+        }
+        for uri in rest {
+            assert_eq!(
+                h.get(uri).header("content-security-policy"),
+                "default-src 'none'",
+                "{uri}"
+            );
+        }
         assert_eq!(h.calls(), 0);
     }
 

@@ -138,8 +138,18 @@ pub fn not_tracked_pill(full_name: &str) -> String {
         "afterglow",
         NOT_TRACKED,
         PROXY_GREY,
-        &format!("afterglow: {name} is not tracked"),
+        &not_tracked_aria(&name),
     )
+}
+
+/// What a not-tracked badge says out loud. A request that named nothing at all
+/// still gets a whole sentence, not a hole where the name would have been.
+fn not_tracked_aria(name: &str) -> String {
+    if name.is_empty() {
+        format!("afterglow: {NOT_TRACKED}")
+    } else {
+        format!("afterglow: {name} is not tracked")
+    }
 }
 
 pub fn card(b: &RepoBadge, theme: Theme) -> String {
@@ -228,7 +238,7 @@ pub fn not_tracked_card(full_name: &str, theme: Theme) -> String {
     let repo = xml_escape(full_name);
     render_card(
         &CardParts {
-            aria: format!("afterglow: {repo} is not tracked"),
+            aria: not_tracked_aria(&repo),
             repo: &repo,
             // Muted, not accent: there is nothing to link to.
             name_fill: t.muted,
