@@ -256,6 +256,12 @@ pub fn index(board: &Board) -> Markup {
             "A badge request for a repo we have not seen before is what starts it being tracked. "
             "The first render says tracking has just started, and the series builds from there."
         }
+        p.note {
+            "If your repo is mostly Markdown, a skills collection say, GitHub files it under "
+            "whatever scripts it finds, or under nothing. "
+            code { "*.md linguist-detectable" } " in " code { ".gitattributes" }
+            " fixes the label, on your repo page and on our rankings both."
+        }
 
         h2 { "Track a repo" }
         form method="post" action="/enroll" {
