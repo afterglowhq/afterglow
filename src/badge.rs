@@ -11,13 +11,13 @@ use crate::widths::{HELVETICA_BOLD_20, VERDANA_11, VERDANA_11_KERN};
 pub const STAR: &str = "M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z";
 
 const AMBER: &str = "#d4a72c";
-const PROXY_GREY: &str = "#9f9f9f";
-const LABEL_BG: &str = "#555555";
+pub const PROXY_GREY: &str = "#9f9f9f";
+pub const LABEL_BG: &str = "#555555";
 const VALUE_FG: &str = "#24292f";
-const PILL_STAR: &str = "#eac54f";
+pub const PILL_STAR: &str = "#eac54f";
 
 const MEASURING: &str = "measuring · first reading tomorrow";
-const NOT_TRACKED: &str = "not tracked";
+pub const NOT_TRACKED: &str = "not tracked";
 
 /// 5px pad + 12px octicon + 3px gap.
 const TEXT_LEFT: f64 = 20.0;
@@ -97,9 +97,17 @@ impl Theme {
 }
 
 pub fn pill(b: &RepoBadge) -> String {
+    let (value, bg, aria) = state_value(b);
+    render_pill(&commas(b.stars), &value, bg, &aria)
+}
+
+/// The state's words, colour, and spoken line. The pill prints these and the
+/// shields endpoint hands them out as JSON, so the two embeds cannot disagree
+/// about the same repo.
+pub fn state_value(b: &RepoBadge) -> (String, &'static str, String) {
     let count = commas(b.stars);
     let since = xml_escape(&b.tracked_since);
-    let (value, bg, aria) = match b.state {
+    match b.state {
         BadgeState::Measured { velocity, .. } => (
             delta(velocity),
             AMBER,
@@ -128,8 +136,7 @@ pub fn pill(b: &RepoBadge) -> String {
             PROXY_GREY,
             format!("afterglow: {count} stars, tracking paused"),
         ),
-    };
-    render_pill(&count, &value, bg, &aria)
+    }
 }
 
 pub fn not_tracked_pill(full_name: &str) -> String {

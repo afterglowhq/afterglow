@@ -213,6 +213,20 @@ fn card_picture(slug: &str) -> String {
     )
 }
 
+/// The shields.io endpoint embed: shields' renderer fed by our numbers, for a
+/// README whose badge row is already in for-the-badge. Any `style=` shields
+/// knows works in its place.
+fn shields_markdown(slug: &str) -> String {
+    // Hand percent-encoding covers the whole charset these URLs can carry:
+    // HOST is fixed, and an owner/name reaching a page is already legal.
+    let endpoint = format!("{HOST}/shields/{slug}")
+        .replace(':', "%3A")
+        .replace('/', "%2F");
+    format!(
+        "[![stars](https://img.shields.io/endpoint?url={endpoint}&style=for-the-badge)]({HOST})"
+    )
+}
+
 /// A copy-ready snippet: the code block plus a clipboard button `shell`'s
 /// script unhides.
 fn snippet(text: String) -> Markup {
@@ -288,6 +302,19 @@ pub fn index(board: &Board) -> Markup {
             "That is GitHub's own pattern for theme-aware images, and it is the default way "
             "to embed the card. A bare " code { "?style=card" } " URL stays light, and "
             code { "?theme=dark" } " pins it dark, for a README that is one color on purpose."
+        }
+        p {
+            "If the rest of your badge row is shields' " code { "for-the-badge" } " style, "
+            "hand shields our numbers and let their renderer draw ours to match. This is "
+            "their endpoint pattern, and every " code { "style=" } " they know works here:"
+        }
+        // No live example image for this one: rendering it would load
+        // img.shields.io into a page that otherwise fetches only itself, and
+        // on GitHub the same URL is proxied by Camo like any other badge.
+        (snippet(shields_markdown("OWNER/REPO")))
+        p.note {
+            "The words and colours stay the pill's own, amber for measured and grey for "
+            "anything weaker; shields only does the drawing."
         }
         p {
             "If your README still points at the dead star-history embed, edit the hostname and "
@@ -437,6 +464,8 @@ pub fn enrolled(outcome: &Outcome) -> Markup {
             (snippet(embed_markdown(full_name)))
             p { "Or the card, which follows each reader's theme:" }
             (snippet(card_picture(full_name)))
+            p { "Or through shields' renderer, if your badge row is in for-the-badge:" }
+            (snippet(shields_markdown(full_name)))
         },
         // Queued covers a spent budget and a GitHub we could not reach, so the
         // wording claims neither.

@@ -284,6 +284,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/enroll", post(enroll_form))
         .route("/badge/{owner}/{repo}", get(canonical_badge))
         .route("/svg", get(compat_badge))
+        .route("/shields/{owner}/{repo}", get(shields_endpoint))
         .route(FONT_URL, get(font))
         .route(
             ICON_SVG_URL,
@@ -510,6 +511,53 @@ async fn compat_badge(
     render(state, &first, Shape::Card(theme_of(&q))).await
 }
 
+/// shields.io's endpoint-badge schema: our numbers, their renderer. One URL and
+/// shields draws the badge in any style it knows, for-the-badge included, so
+/// this server never grows a second geometry. The words and colours are the
+/// pill's own, and fidelity survives the restyling.
+async fn shields_endpoint(
+    State(state): State<Arc<AppState>>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Response {
+    let name = format!("{owner}/{repo}");
+    let resolved = {
+        let (state, name) = (Arc::clone(&state), name.clone());
+        tokio::task::spawn_blocking(move || resolve(&state, &name, now_unix())).await
+    };
+    let badge = resolved.unwrap_or_else(|e| {
+        eprintln!("badge {name}: {e}");
+        None
+    });
+    let (label, message, color, max_age) = match &badge {
+        Some(b) => {
+            let (message, color, _aria) = badge::state_value(b);
+            (badge::commas(b.stars), message, color, max_age_for(b.state))
+        }
+        // The name is not echoed here: shields prints whatever we hand it, and
+        // only our own renderer is trusted with a name that was typed at us.
+        None => (
+            "afterglow".to_string(),
+            badge::NOT_TRACKED.to_string(),
+            badge::PROXY_GREY,
+            FRESH_MAX_AGE,
+        ),
+    };
+    let body = serde_json::json!({
+        "schemaVersion": 1,
+        "label": label,
+        "message": message,
+        "color": color,
+        "labelColor": badge::LABEL_BG,
+        "logoSvg": format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill="{}" d="{}"/></svg>"#,
+            badge::PILL_STAR,
+            badge::STAR
+        ),
+        "cacheSeconds": max_age,
+    });
+    json_response(body.to_string(), max_age)
+}
+
 fn theme_of(q: &HashMap<String, String>) -> Theme {
     match q.get("theme").map(String::as_str) {
         Some("dark") => Theme::Dark,
@@ -578,6 +626,24 @@ fn svg_response(body: String, max_age: u32) -> Response {
             (
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("image/svg+xml; charset=utf-8"),
+            ),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_str(&format!("public, max-age={max_age}"))
+                    .expect("max-age is a number"),
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+fn json_response(body: String, max_age: u32) -> Response {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
             ),
             (
                 header::CACHE_CONTROL,
@@ -1459,6 +1525,38 @@ mod tests {
     }
 
     #[test]
+    fn shields_endpoint_speaks_the_schema_with_the_pill_words() {
+        let h = harness(vec![]);
+        measured(&h, 1, "o/r");
+
+        let got = h.get("/shields/o/r");
+        assert_eq!(got.status, StatusCode::OK);
+        assert_eq!(got.content_type, "application/json");
+        assert_eq!(got.cache_control, "public, max-age=3600");
+        let json: serde_json::Value = serde_json::from_str(&got.body).expect("schema json");
+        assert_eq!(json["schemaVersion"], 1);
+        assert_eq!(json["label"], "1,100");
+        assert_eq!(json["message"], "▲ 100/day");
+        assert_eq!(json["color"], "#d4a72c");
+        assert_eq!(json["labelColor"], "#555555");
+        assert_eq!(json["cacheSeconds"], 3600);
+        let logo = json["logoSvg"].as_str().expect("a logo");
+        assert!(logo.contains(badge::STAR), "{logo}");
+
+        // Untracked answers the schema too, in the degraded grey, and never
+        // echoes the name that was typed at us.
+        let got = h.get("/shields/ghost/ship");
+        assert_eq!(got.status, StatusCode::OK);
+        assert_eq!(got.cache_control, "public, max-age=300");
+        let json: serde_json::Value = serde_json::from_str(&got.body).expect("schema json");
+        assert_eq!(json["label"], "afterglow");
+        assert_eq!(json["message"], "not tracked");
+        assert_eq!(json["color"], "#9f9f9f");
+        assert_eq!(json["cacheSeconds"], 300);
+        assert!(!got.body.contains("ghost"), "{}", got.body);
+    }
+
+    #[test]
     fn style_defaults_to_the_pill_and_theme_only_moves_the_card() {
         let h = harness(vec![]);
         measured(&h, 1, "o/r");
@@ -1771,7 +1869,8 @@ mod tests {
             // clipboard button, loaded as a file, and nothing runs inline.
             assert_eq!(page.body.matches("<script").count(), 1, "{uri}");
             assert!(
-                page.body.contains(&format!(r#"<script src="{COPY_JS_URL}" defer>"#)),
+                page.body
+                    .contains(&format!(r#"<script src="{COPY_JS_URL}" defer>"#)),
                 "{uri}"
             );
         }
