@@ -105,6 +105,11 @@ const ICON_CACHE: &str = "public, max-age=86400";
 const APRIL_2025: &str = include_str!("../static/april-2025.html");
 pub const APRIL_2025_URL: &str = "/april-2025";
 
+/// Asks AI crawlers to keep off the rankings; the rest of the site is theirs
+/// to read. Advisory by nature; anything stricter is a Cloudflare rule in the
+/// dashboard, not here.
+const ROBOTS: &str = include_str!("../static/robots.txt");
+
 /// Two years of HTTPS-only, and deliberately no `preload` token: that token is a
 /// claim that the domain is submitted to the browser preload list, and it is not.
 const HSTS: &str = "max-age=63072000; includeSubDomains";
@@ -282,6 +287,7 @@ fn router(state: Arc<AppState>) -> Router {
             TOUCH_ICON_URL,
             get(|| async { icon(TOUCH_ICON, "image/png") }),
         )
+        .route("/robots.txt", get(robots))
         .fallback(missing)
         .layer(map_response(secure))
         .with_state(state)
@@ -415,6 +421,20 @@ fn icon(bytes: &'static [u8], mime: &'static str) -> Response {
             (header::CACHE_CONTROL, HeaderValue::from_static(ICON_CACHE)),
         ],
         bytes,
+    )
+        .into_response()
+}
+
+async fn robots() -> Response {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static(ICON_CACHE)),
+        ],
+        ROBOTS,
     )
         .into_response()
 }
@@ -1755,13 +1775,44 @@ mod tests {
     }
 
     #[test]
+    fn robots_txt_turns_away_ai_crawlers_and_no_one_else() {
+        let h = harness(vec![]);
+        let got = h.get("/robots.txt");
+        assert_eq!(got.status, StatusCode::OK);
+        assert_eq!(got.content_type, "text/plain; charset=utf-8");
+        assert_eq!(got.cache_control, ICON_CACHE);
+        // Named AI bots share one disallow group scoped to the rankings, the
+        // catch-all allow sits after. Crawlers match by most-specific agent,
+        // not first-match; the order asserts just pin the file's shape.
+        let block = got.body.find("User-agent: GPTBot").unwrap();
+        let deny = got.body.find("Disallow: /rankings").unwrap();
+        let open = got.body.find("User-agent: *\nAllow: /").unwrap();
+        assert!(block < deny && deny < open, "{}", got.body);
+        // The block never widens to the whole site by accident.
+        assert!(!got.body.contains("Disallow: /\n"), "{}", got.body);
+        assert!(got.body.contains("User-agent: ClaudeBot"), "{}", got.body);
+        assert!(
+            got.body.contains("User-agent: Google-Extended"),
+            "{}",
+            got.body
+        );
+        assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
     fn every_response_carries_its_security_headers() {
         let h = harness(vec![]);
         measured(&h, 1, "o/r");
 
         let pages = ["/", "/rankings", APRIL_2025_URL];
         let badges = ["/badge/o/r", "/badge/o/r?style=card", "/svg?repos=o/r"];
-        let rest = [FONT_URL, ICON_SVG_URL, ICON_PNG_URL, "/nowhere"];
+        let rest = [
+            FONT_URL,
+            ICON_SVG_URL,
+            ICON_PNG_URL,
+            "/robots.txt",
+            "/nowhere",
+        ];
         for uri in pages.iter().chain(&badges).chain(&rest) {
             let got = h.get(uri);
             assert_eq!(got.header("x-content-type-options"), "nosniff", "{uri}");
