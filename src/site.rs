@@ -277,8 +277,10 @@ pub fn index(board: &Board) -> Markup {
 
         h2 { "The leaderboard" }
         p {
-            "Every tracked repo we can measure, ranked by stars per day. A card's percentile line "
-            "is checkable there: same pool, same arithmetic, same day. "
+            "Repos from 2,000 stars, ranked by stars per day. We track more than we rank: "
+            "every young repo from 500 stars up is in the store, so whatever catches fire "
+            "next arrives with its takeoff already recorded. A repo somebody asked us to "
+            "track sits on the board at any size. "
             a href="/rankings" { "Open the rankings" } "."
         }
 
@@ -301,8 +303,10 @@ pub fn rankings(board: &Board, sort: Sort) -> Markup {
     let body = html! {
         h1 { "Velocity" }
         p.lede {
-            "Every tracked repo we can measure, by stars per day. Measured rows carry a percentile "
-            "against the whole tracked set. Grey rows are young repos ranked on a lifetime "
+            "Every repo from 2,000 stars we can measure, by stars per day, plus anything "
+            "tracked because somebody asked. The store is wider than this page: we follow "
+            "young repos from 500 stars up, and a percentile reads against that whole "
+            "tracked set, shown here or not. Grey rows are young repos ranked on a lifetime "
             "average, which is a weaker claim and looks like one. The sparklines here fill in a "
             "day at a time: we started collecting on 30 July 2026. If you want a preview of how "
             "a whole month of data looks, see " a href=(APRIL_2025_URL) { "April 2025, replayed" }

@@ -141,7 +141,7 @@ SELECT ts, stars FROM snapshots WHERE repo_id = ?1 AND ts >= ?2 ORDER BY ts";
 /// The fleet's recent readings in one pass. `status = 'active'` is what keeps an
 /// opted-out repo out of both the percentile pool and the leaderboard.
 const RECENT_SNAPSHOTS: &str = "\
-SELECT s.repo_id, r.full_name, r.created_at, r.language, s.ts, s.stars
+SELECT s.repo_id, r.full_name, r.created_at, r.language, r.lane, s.ts, s.stars
 FROM snapshots s JOIN repos r ON r.id = s.repo_id
 WHERE r.status = 'active' AND s.ts >= ?1
 ORDER BY s.repo_id, s.ts";
@@ -750,6 +750,8 @@ struct Series {
     full_name: String,
     created_at: Option<String>,
     language: Option<String>,
+    /// How the repo entered (ADR-002); requested lanes sit on the board at any size.
+    lane: String,
     readings: Vec<Reading>,
 }
 
@@ -769,8 +771,8 @@ fn recent_series(conn: &Connection, now: i64) -> Result<Vec<Series>> {
     while let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
         let reading = Reading {
-            ts: row.get(4)?,
-            stars: row.get(5)?,
+            ts: row.get(5)?,
+            stars: row.get(6)?,
         };
         match out.last_mut() {
             Some(series) if series.id == id => series.readings.push(reading),
@@ -779,6 +781,7 @@ fn recent_series(conn: &Connection, now: i64) -> Result<Vec<Series>> {
                 full_name: row.get(1)?,
                 created_at: row.get(2)?,
                 language: row.get(3)?,
+                lane: row.get(4)?,
                 readings: vec![reading],
             }),
         }
@@ -954,8 +957,19 @@ impl RowVelocity {
     }
 }
 
+/// The board shows the slice above this many stars; a repo somebody asked for
+/// (the embed and manual lanes) sits on it at any size. A display line only,
+/// not ADR-002's coverage floor: moving it changes what the page prints, never
+/// what is collected. The percentile pool stays every tracked repo, so the
+/// card's "all tracked repos" stays true (ticket 024).
+const BOARD_FLOOR: i64 = 2000;
+
 fn board(conn: &Connection, now: i64) -> Result<Board> {
     let series = recent_series(conn, now)?;
+    let on_board = |s: &Series| {
+        matches!(s.lane.as_str(), "embed" | "manual")
+            || s.readings.last().is_some_and(|r| r.stars >= BOARD_FLOOR)
+    };
     let measured: Vec<Option<i64>> = series
         .iter()
         .map(|s| series_velocity(&s.readings))
@@ -963,10 +977,11 @@ fn board(conn: &Connection, now: i64) -> Result<Board> {
     let fleet: Vec<i64> = measured.iter().flatten().copied().collect();
     // The fastest mover sets one vertical scale for every minispark, so the
     // angle of a row means the same thing as the angle of the row above it.
+    // Rows only: a sub-floor rocket the page never draws must not flatten it.
     let shared_range = series
         .iter()
         .zip(&measured)
-        .filter(|(_, per_day)| per_day.is_some())
+        .filter(|(s, per_day)| per_day.is_some() && on_board(s))
         .map(|(s, _)| spark_range(&s.readings, now))
         .max();
 
@@ -976,6 +991,11 @@ fn board(conn: &Connection, now: i64) -> Result<Board> {
         let Some(latest) = s.readings.last() else {
             continue;
         };
+        // Tracked wider than ranked: a scan repo under the floor feeds the
+        // store and the percentile pool, not the page (ticket 024).
+        if !on_board(s) {
+            continue;
+        }
         through = through.max(Some(latest.ts.as_str()));
         let (velocity, spark) = match *per_day {
             Some(per_day) => (
@@ -1007,9 +1027,10 @@ fn board(conn: &Connection, now: i64) -> Result<Board> {
             .cmp(&a.velocity.per_day())
             .then_with(|| a.full_name.cmp(&b.full_name))
     });
-    // Every row, not a top hundred: a card reading "top 80% velocity" belongs to a
-    // repo no short list would ever print, and SPEC §5 wants that number checkable
-    // here.
+    // Every row above the floor, not a top hundred: a card reading "top 80%
+    // velocity" belongs to a repo no short list would ever print. SPEC §5's
+    // checkability now stops at the floor: the pool counts repos the page
+    // does not show, and the ledes say so out loud (ticket 024).
     //
     // The full board is ~25 KB gzipped at ~430 repos and stops being a
     // page somewhere well short of the 50k-repo coverage floor. Pagination, or a
@@ -1207,6 +1228,8 @@ mod tests {
 
     impl Harness {
         /// Ages are hours before now; a `created` of `None` is the unknown-age case.
+        /// The embed lane, so fixtures sit on the board whatever their stars; the
+        /// board-floor test seeds the scan lane itself.
         fn track(&self, id: i64, name: &str, enrolled_ago: i64, created_ago: Option<i64>) {
             self.track_as(id, name, enrolled_ago, created_ago, "active");
         }
@@ -1219,18 +1242,35 @@ mod tests {
             created_ago: Option<i64>,
             status: &str,
         ) {
+            self.track_full(id, name, enrolled_ago, created_ago, status, "embed");
+        }
+
+        fn track_lane(&self, id: i64, name: &str, lane: &str) {
+            self.track_full(id, name, 24 * 30, None, "active", lane);
+        }
+
+        fn track_full(
+            &self,
+            id: i64,
+            name: &str,
+            enrolled_ago: i64,
+            created_ago: Option<i64>,
+            status: &str,
+            lane: &str,
+        ) {
             self.state
                 .store()
                 .conn
                 .execute(
                     "INSERT INTO repos (id, full_name, status, lane, enrolled_at, created_at)
-                     VALUES (?1, ?2, ?3, 'scan', ?4, ?5)",
+                     VALUES (?1, ?2, ?3, ?6, ?4, ?5)",
                     params![
                         id,
                         name,
                         status,
                         iso8601_utc(self.now - enrolled_ago * HOUR),
                         created_ago.map(|h| iso8601_utc(self.now - h * HOUR)),
+                        lane,
                     ],
                 )
                 .expect("seeding a repo");
@@ -1911,6 +1951,41 @@ mod tests {
         );
         // The slowest repo of all is down there too.
         assert!(board.contains(">o/r130</a>"), "{board}");
+        assert_eq!(h.calls(), 0);
+    }
+
+    /// The store is wider than the board (ticket 024): a scan repo under the
+    /// floor gets no row but keeps its weight in every percentile, and a repo
+    /// somebody asked for sits on the board at any size.
+    #[test]
+    fn the_board_floor_hides_scan_repos_but_not_their_pool_weight() {
+        let h = harness(vec![]);
+        // A scan repo above the floor: on the board.
+        h.track_lane(1, "big/scan", "scan");
+        h.snapshot(1, 24, 2_500);
+        h.snapshot(1, 0, 2_600);
+        // A scan repo under the floor, faster than everything: pool only.
+        h.track_lane(2, "small/rocket", "scan");
+        h.snapshot(2, 24, 500);
+        h.snapshot(2, 0, 900);
+        // An embed repo under the floor: somebody asked, so it has a row.
+        h.track_lane(3, "small/asked", "embed");
+        h.snapshot(3, 24, 100);
+        h.snapshot(3, 0, 150);
+
+        let board = h.get("/rankings").body;
+        assert!(board.contains(">big/scan</a>"), "{board}");
+        assert!(board.contains(">small/asked</a>"), "{board}");
+        assert!(!board.contains("small/rocket"), "{board}");
+        // Two of three in a pool the page only half shows: only the hidden
+        // rocket's weight makes big/scan "top 67%" instead of top 50%.
+        assert!(
+            board.contains(r#"top 67%<span class="sr-only"> velocity</span>"#),
+            "{board}"
+        );
+        // The rocket's card still measures, floor or no floor.
+        let card = h.get("/badge/small/rocket?style=card").body;
+        assert!(card.contains("top 33% velocity"), "{card}");
         assert_eq!(h.calls(), 0);
     }
 

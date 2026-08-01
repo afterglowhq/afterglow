@@ -119,8 +119,12 @@ impl GitHub {
         let url = format!("{}/search/repositories", self.base);
         let params = [
             ("q", query.to_string()),
+            // Ascending, so a bucket past the Search API's 1000-result cap
+            // sheds its top (repos about to rise into the next bucket's
+            // fully-scanned bottom) instead of its floor, where a riser
+            // could sit unseen for weeks.
             ("sort", "stars".to_string()),
-            ("order", "desc".to_string()),
+            ("order", "asc".to_string()),
             ("per_page", "100".to_string()),
             ("page", page.to_string()),
         ];

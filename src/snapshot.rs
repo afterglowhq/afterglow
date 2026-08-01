@@ -12,11 +12,28 @@ use crate::store::{
 };
 use crate::time::{SECONDS_PER_DAY, date_utc, iso8601_utc, now_unix};
 
-/// The Search API caps any one query at 1000 results, so the sweep is split by
-/// star range to keep every query under the cap.
-const BUCKETS: [&str; 4] = ["2000..7000", "7000..25000", "25000..100000", ">100000"];
+/// The Search API caps any one query at 1000 results, so the scan is split by
+/// star range to keep every query under the cap. Populations on 2026-08-01
+/// were 919, 882, 662, 609, 176, 46, 5, so every bucket has headroom, and the
+/// ascending sort in `search_repositories` means an overflowing bucket sheds
+/// its top, not its floor.
+///
+/// The 500 bar is ADR-002's "much lower star bar" for the young scan: below
+/// the board floor the store is quietly wider than the site, and a repo that
+/// suddenly takes off is already mid-series by the time anyone looks
+/// (ticket 024).
+const BUCKETS: [&str; 7] = [
+    "500..700",
+    "700..1100",
+    "1100..2000",
+    "2000..7000",
+    "7000..25000",
+    "25000..100000",
+    ">100000",
+];
 const MAX_AGE_DAYS: i64 = 180;
-const PAGES: u32 = 2;
+/// The Search API's own ceiling: ten pages of 100 is the 1000-result cap.
+const PAGES: u32 = 10;
 
 /// A repo the scan did not just refresh is due again after this long.
 const STALE_AFTER_HOURS: i64 = 20;
@@ -176,7 +193,6 @@ fn scan(gh: &GitHub, now: i64) -> Result<HashMap<i64, SearchItem>> {
     for bucket in BUCKETS {
         let query = format!("created:>{cutoff} stars:{bucket}");
         for page in 1..=PAGES {
-            // 200 a bucket is plenty; the tail is noise.
             let items = gh.search_repositories(&query, page)?;
             let full = items.len() == 100;
             for item in items {
@@ -346,13 +362,16 @@ mod tests {
             (200, search_page(&[])),
             (200, search_page(&[])),
             (200, search_page(&[])),
+            (200, search_page(&[])),
+            (200, search_page(&[])),
+            (200, search_page(&[])),
             // What the queue drain gets when it asks about the name it parked.
             (200, repo_json(2, "b/renamed", 5_000, created)),
         ]);
 
         run(&mut s, &GitHub::at(&base)).unwrap();
 
-        assert_eq!(hits.load(Ordering::SeqCst), 5);
+        assert_eq!(hits.load(Ordering::SeqCst), 8);
         // The scan found it and wrote nothing; the name in the store did not move.
         assert_eq!(
             scalar::<i64>(&s, "SELECT COUNT(*) FROM snapshots WHERE repo_id = 2"),
