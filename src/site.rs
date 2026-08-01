@@ -9,8 +9,8 @@ use maud::{DOCTYPE, Markup, PreEscaped, html};
 use crate::badge::{self, STAR};
 use crate::language;
 use crate::serve::{
-    Board, BoardRow, FONT_URL, ICON_PNG_URL, ICON_SVG_URL, MINI_SPARK, MINI_SPARK_HEIGHT, Outcome,
-    RowVelocity, Sort, TOUCH_ICON_URL,
+    APRIL_2025_URL, Board, BoardRow, FONT_URL, ICON_PNG_URL, ICON_SVG_URL, MINI_SPARK,
+    MINI_SPARK_HEIGHT, Outcome, RowVelocity, Sort, TOUCH_ICON_URL,
 };
 
 const HOST: &str = "https://afterglow.watch";
@@ -303,7 +303,10 @@ pub fn rankings(board: &Board, sort: Sort) -> Markup {
         p.lede {
             "Every tracked repo we can measure, by stars per day. Measured rows carry a percentile "
             "against the whole tracked set. Grey rows are young repos ranked on a lifetime "
-            "average, which is a weaker claim and looks like one."
+            "average, which is a weaker claim and looks like one. The sparklines here fill in a "
+            "day at a time: we started collecting on 30 July 2026. If you want a preview of how "
+            "a whole month of data looks, see " a href=(APRIL_2025_URL) { "April 2025, replayed" }
+            "."
         }
         @if board.rows.is_empty() {
             p {

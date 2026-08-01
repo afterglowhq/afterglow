@@ -67,6 +67,8 @@ pub const MINI_SPARK: Region = Region {
 };
 /// The box the minispark is drawn in; its area fill closes on the bottom edge.
 pub const MINI_SPARK_HEIGHT: f64 = 24.0;
+/// The least a board-scaled spark may rise, so movement never draws as none.
+const SPARK_MIN_RISE: f64 = 1.0;
 
 /// Day-one and not-tracked states change tomorrow; measured badges can sit in the CDN.
 const FRESH_MAX_AGE: u32 = 300;
@@ -96,6 +98,12 @@ pub const ICON_PNG_URL: &str = "/static/favicon-96.png";
 pub const TOUCH_ICON_URL: &str = "/static/apple-touch-icon.png";
 /// A tab icon moves when the brand does, which is not on any schedule.
 const ICON_CACHE: &str = "public, max-age=86400";
+
+/// April 2025 replayed through the rankings: the board fully enriched from the
+/// archived public record, rendered once, checked in, and served verbatim. The
+/// page's whole claim is that it does not move, so no handler rebuilds it.
+const APRIL_2025: &str = include_str!("../static/april-2025.html");
+pub const APRIL_2025_URL: &str = "/april-2025";
 
 /// Two years of HTTPS-only, and deliberately no `preload` token: that token is a
 /// claim that the domain is submitted to the browser preload list, and it is not.
@@ -260,6 +268,7 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/rankings", get(rankings))
+        .route(APRIL_2025_URL, get(april_2025))
         .route("/enroll", post(enroll_form))
         .route("/badge/{owner}/{repo}", get(canonical_badge))
         .route("/svg", get(compat_badge))
@@ -371,6 +380,21 @@ async fn enroll_form(
             }
         });
     html(site::enrolled(&outcome), NO_STORE)
+}
+
+/// The replay is one static string, so its handler is the font's, in HTML.
+async fn april_2025() -> Response {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static(PAGE_CACHE)),
+        ],
+        APRIL_2025,
+    )
+        .into_response()
 }
 
 async fn font() -> Response {
@@ -802,15 +826,11 @@ fn spark(conn: &Connection, repo_id: i64, now: i64) -> Result<Vec<(f64, f64)>> {
         })
     })?;
     let readings: Vec<Reading> = rows.collect::<rusqlite::Result<_>>()?;
-    Ok(spark_points(&readings, now, &CARD_SPARK))
+    Ok(spark_points(&readings, now, &CARD_SPARK, None))
 }
 
-/// The last 30 days of a series as points in a region. x is real time, so a young
-/// series occupies only the right and the empty left is the whole point.
-fn spark_points(readings: &[Reading], now: i64, region: &Region) -> Vec<(f64, f64)> {
-    let start = now - SPARK_DAYS * SECONDS_PER_DAY;
-
-    // One point a day: the last reading of each UTC day.
+/// One point a day inside the window: the last reading of each UTC day.
+fn daily_points(readings: &[Reading], start: i64) -> Vec<(i64, i64)> {
     let mut daily: Vec<(i64, i64)> = Vec::new();
     for reading in readings {
         let Some(at) = parse_iso8601_utc(&reading.ts).filter(|&at| at >= start) else {
@@ -823,6 +843,39 @@ fn spark_points(readings: &[Reading], now: i64, region: &Region) -> Vec<(f64, f6
             _ => daily.push((at, reading.stars)),
         }
     }
+    daily
+}
+
+/// How far a series moved inside the window, for a board's shared scale.
+fn spark_range(readings: &[Reading], now: i64) -> i64 {
+    let daily = daily_points(readings, now - SPARK_DAYS * SECONDS_PER_DAY);
+    if daily.len() < 2 {
+        return 0;
+    }
+    let (min, max) = daily
+        .iter()
+        .fold((i64::MAX, i64::MIN), |(lo, hi), &(_, s)| {
+            (lo.min(s), hi.max(s))
+        });
+    max - min
+}
+
+/// The last 30 days of a series as points in a region. x is real time, so a young
+/// series occupies only the right and the empty left is the whole point.
+///
+/// `shared_range` is the largest 30-day movement on the board this series sits
+/// on: every row is drawn in that row's stars-per-pixel, so a steeper line is a
+/// faster repo, comparable row to row. A series drawn alone (the card) passes
+/// None and takes the whole region, because a lone spark has nothing to be
+/// comparable with and its magnitude is printed beside it.
+fn spark_points(
+    readings: &[Reading],
+    now: i64,
+    region: &Region,
+    shared_range: Option<i64>,
+) -> Vec<(f64, f64)> {
+    let start = now - SPARK_DAYS * SECONDS_PER_DAY;
+    let daily = daily_points(readings, start);
     if daily.len() < 2 {
         return Vec::new();
     }
@@ -832,16 +885,25 @@ fn spark_points(readings: &[Reading], now: i64, region: &Region) -> Vec<(f64, f6
         .fold((i64::MAX, i64::MIN), |(lo, hi), &(_, s)| {
             (lo.min(s), hi.max(s))
         });
+    let range = max - min;
+    let height = region.bottom - region.top;
+    // A scaled row keeps at least a visible tilt: dead flat stays the mark of a
+    // series that did not move, never of one that moved less than the leader.
+    let extent = match shared_range {
+        Some(shared) if shared > range => {
+            (height * range as f64 / shared as f64).max(SPARK_MIN_RISE)
+        }
+        _ => height,
+    };
     let span = (now - start) as f64;
     daily
         .iter()
         .map(|&(at, stars)| {
             let x = ((at - start) as f64 / span * region.width).clamp(0.0, region.width);
-            let y = if max == min {
+            let y = if range == 0 {
                 region.flat
             } else {
-                region.bottom
-                    - (stars - min) as f64 / (max - min) as f64 * (region.bottom - region.top)
+                region.bottom - (stars - min) as f64 / range as f64 * extent
             };
             (x, y)
         })
@@ -899,6 +961,14 @@ fn board(conn: &Connection, now: i64) -> Result<Board> {
         .map(|s| series_velocity(&s.readings))
         .collect();
     let fleet: Vec<i64> = measured.iter().flatten().copied().collect();
+    // The fastest mover sets one vertical scale for every minispark, so the
+    // angle of a row means the same thing as the angle of the row above it.
+    let shared_range = series
+        .iter()
+        .zip(&measured)
+        .filter(|(_, per_day)| per_day.is_some())
+        .map(|(s, _)| spark_range(&s.readings, now))
+        .max();
 
     let mut through: Option<&str> = None;
     let mut rows: Vec<BoardRow> = Vec::new();
@@ -913,7 +983,7 @@ fn board(conn: &Connection, now: i64) -> Result<Board> {
                     per_day,
                     top_percent: percentile_of(&fleet, per_day),
                 },
-                spark_points(&s.readings, now, &MINI_SPARK),
+                spark_points(&s.readings, now, &MINI_SPARK, shared_range),
             ),
             // Nothing measured: a young repo still has an honest average, and an
             // old one has no number at all, so it has no row.
@@ -1640,7 +1710,7 @@ mod tests {
         let h = harness(vec![]);
         measured(&h, 1, "o/r");
 
-        let pages = ["/", "/rankings"];
+        let pages = ["/", "/rankings", APRIL_2025_URL];
         let badges = ["/badge/o/r", "/badge/o/r?style=card", "/svg?repos=o/r"];
         let rest = [FONT_URL, ICON_SVG_URL, ICON_PNG_URL, "/nowhere"];
         for uri in pages.iter().chain(&badges).chain(&rest) {
@@ -1687,6 +1757,31 @@ mod tests {
                 "{uri}"
             );
         }
+        assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
+    fn the_replay_is_a_fixed_page_and_the_rankings_lede_points_to_it() {
+        let h = harness(vec![]);
+        measured(&h, 1, "o/r");
+
+        let replay = h.get(APRIL_2025_URL);
+        assert_eq!(replay.status, StatusCode::OK);
+        assert_eq!(replay.content_type, "text/html; charset=utf-8");
+        assert_eq!(replay.cache_control, PAGE_CACHE);
+        assert!(replay.body.contains("Velocity, April 2025"));
+        // Grey is the page's whole claim: neither theme's live gold appears.
+        assert!(!replay.body.contains("#eac54f") && !replay.body.contains("#e3b341"));
+        // Its font and icons are the site's own, inside the page CSP.
+        assert!(replay.body.contains(FONT_URL) && replay.body.contains(ICON_SVG_URL));
+        assert!(!replay.body.contains("data:"));
+
+        let rankings = h.get("/rankings");
+        assert!(
+            rankings
+                .body
+                .contains(&format!("href=\"{APRIL_2025_URL}\""))
+        );
         assert_eq!(h.calls(), 0);
     }
 
@@ -2285,5 +2380,37 @@ mod tests {
                 .iter()
                 .all(|&(_, y)| y == 20.0)
         );
+    }
+
+    #[test]
+    fn board_minisparks_share_one_vertical_scale() {
+        let h = harness(vec![]);
+        // Three measured repos over the same two days: rises of 100, 10, and 1.
+        for (id, name, latest) in [(1, "o/fast", 300), (2, "o/slow", 210), (3, "o/crawl", 201)] {
+            h.track(id, name, 24 * 40, None);
+            h.snapshot(id, 48, 200);
+            h.snapshot(id, 0, latest);
+        }
+
+        let store = h.state.store();
+        let b = board(&store.conn, h.now).unwrap();
+        let rise = |row: &BoardRow| {
+            let ys = row.spark.iter().map(|&(_, y)| y);
+            let rise = ys.clone().fold(f64::MIN, f64::max) - ys.fold(f64::MAX, f64::min);
+            (rise * 10.0).round() / 10.0
+        };
+        assert_eq!(
+            b.rows
+                .iter()
+                .map(|r| r.full_name.as_str())
+                .collect::<Vec<_>>(),
+            ["o/fast", "o/slow", "o/crawl"]
+        );
+        // The fastest row spans the region; the rest rise in its stars-per-pixel,
+        // down to the floor that keeps movement from drawing as none.
+        assert_eq!(rise(&b.rows[0]), 16.0);
+        assert_eq!(rise(&b.rows[1]), 1.6);
+        assert_eq!(rise(&b.rows[2]), SPARK_MIN_RISE);
+        assert_eq!(h.calls(), 0);
     }
 }
