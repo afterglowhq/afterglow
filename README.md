@@ -1,12 +1,14 @@
 # afterglow
 
+[![stars](https://afterglow.watch/badge/afterglowhq/afterglow)](https://afterglow.watch)
+
 GitHub stopped exposing star history on June 30, 2026. The lists died; only the current counts survive.
 Afterglow is a snapshot fleet that has been recording those counts daily since July 30, 2026.
 A missed day can never be recovered, so the dataset itself is the point: measured star velocity, honest fidelity labels, and a badge that drops into the hole the dead chart embeds left behind.
 
 Live at [afterglow.watch](https://afterglow.watch).
 
-    ![stars](https://afterglow.watch/badge/OWNER/REPO)
+    [![stars](https://afterglow.watch/badge/OWNER/REPO)](https://afterglow.watch)
 
 First sight of that URL enrolls the repo; the badge fills in from there.
 The old star-history embed URLs also answer (`/svg?repos=owner/name`), so replacing a dead chart is a one-hostname edit.

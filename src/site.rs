@@ -1,15 +1,16 @@
 //! The public HTML: the site page, the leaderboard, and what the form says back.
 //!
-//! Server-rendered, no client JS, one stylesheet inline. Every number on these
-//! pages is formatted by the badge's own code, so a card's percentile and its row
-//! on the leaderboard cannot disagree about the same repo.
+//! Server-rendered, one stylesheet inline; the only client JS is the clipboard
+//! button on embed snippets, and the page works without it. Every number on
+//! these pages is formatted by the badge's own code, so a card's percentile and
+//! its row on the leaderboard cannot disagree about the same repo.
 
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 
 use crate::badge::{self, STAR};
 use crate::language;
 use crate::serve::{
-    APRIL_2025_URL, Board, BoardRow, FONT_URL, ICON_PNG_URL, ICON_SVG_URL, MINI_SPARK,
+    APRIL_2025_URL, Board, BoardRow, COPY_JS_URL, FONT_URL, ICON_PNG_URL, ICON_SVG_URL, MINI_SPARK,
     MINI_SPARK_HEIGHT, Outcome, RowVelocity, Sort, TOUCH_ICON_URL,
 };
 
@@ -99,6 +100,10 @@ pre {
   margin: 0 0 12px;
   overflow-x: auto;
 }
+.snippet { position: relative; }
+.snippet pre { padding-right: 72px; }
+.snippet code { user-select: all; }
+.snippet .copy { position: absolute; top: 6px; right: 6px; padding: 2px 10px; font-size: 0.75rem; }
 .masthead {
   display: flex;
   align-items: baseline;
@@ -190,6 +195,35 @@ button:hover { border-color: var(--fg); }
 }
 "#;
 
+/// The embed markdown for a repo: badge image, wrapped in a link back to the
+/// site so every README carrying it also says where it came from.
+fn embed_markdown(slug: &str) -> String {
+    format!("[![stars]({HOST}/badge/{slug})]({HOST})")
+}
+
+/// The card embed: GitHub's own pattern for theme-aware images, one block that
+/// serves the dark cut to dark-mode readers and the light cut to everyone
+/// else, wrapped in the same link home as the pill snippet.
+fn card_picture(slug: &str) -> String {
+    format!(
+        "<a href=\"{HOST}\"><picture>\n  \
+         <source media=\"(prefers-color-scheme: dark)\" srcset=\"{HOST}/badge/{slug}?style=card&theme=dark\">\n  \
+         <img alt=\"stars\" src=\"{HOST}/badge/{slug}?style=card\" width=\"420\" height=\"150\">\n\
+         </picture></a>"
+    )
+}
+
+/// A copy-ready snippet: the code block plus a clipboard button `shell`'s
+/// script unhides.
+fn snippet(text: String) -> Markup {
+    html! {
+        .snippet {
+            pre { code { (text) } }
+            button.copy type="button" hidden { "copy" }
+        }
+    }
+}
+
 pub fn index(board: &Board) -> Markup {
     let example = board.rows.first().map(|r| r.full_name.as_str());
     let slug = example.unwrap_or("OWNER/REPO");
@@ -220,18 +254,28 @@ pub fn index(board: &Board) -> Markup {
         }
 
         h2 { "Put it in your README" }
-        p { "One URL. No token, and it works for repos you do not own." }
-        pre { code { "![stars](" (HOST) "/badge/" (slug) ")" } }
         p {
-            "Add " code { "?style=card" } " for the card with its 30-day sparkline, and "
-            code { "?theme=dark" } " if the README is dark. The pill is one render everywhere, "
-            "the way the rest of the badge row is."
+            "One URL. No token, and it works for repos you do not own. The badge links back "
+            "here, which is how the next maintainer who sees it finds this page."
         }
+        // Always the placeholder, never a real repo: this snippet is copied
+        // more than it is read, and it must not paste as somebody else's badge.
+        (snippet(embed_markdown("OWNER/REPO")))
+        p.note {
+            "Swap OWNER/REPO for your own repo's name. Tracking a repo through the form "
+            "below answers with this snippet already filled in."
+        }
+        p {
+            "There is also the card, with its 30-day sparkline. The pill is one render "
+            "everywhere, the way the rest of the badge row is; the card comes in a light and "
+            "a dark cut, and this block serves each reader whichever their system asks for:"
+        }
+        (snippet(card_picture("OWNER/REPO")))
         @if let Some(name) = example {
             .examples {
                 img src=(format!("/badge/{name}")) alt=(format!("afterglow pill for {name}")) height="20";
                 // The card the way a themed README should ask for it, which is
-                // also the pattern this page is documenting.
+                // also the pattern the snippet above hands out.
                 picture {
                     source media="(prefers-color-scheme: dark)"
                         srcset=(format!("/badge/{name}?style=card&theme=dark"));
@@ -241,11 +285,9 @@ pub fn index(board: &Board) -> Markup {
             }
         }
         p.note {
-            "The card above follows this page's theme: a "
-            code { "<picture>" }
-            " with a "
-            code { "prefers-color-scheme" }
-            " source, which is what a README wants if it has to read well in both."
+            "That is GitHub's own pattern for theme-aware images, and it is the default way "
+            "to embed the card. A bare " code { "?style=card" } " URL stays light, and "
+            code { "?theme=dark" } " pins it dark, for a README that is one color on purpose."
         }
         p {
             "If your README still points at the dead star-history embed, edit the hostname and "
@@ -392,7 +434,9 @@ pub fn enrolled(outcome: &Outcome) -> Markup {
             .examples {
                 img src=(format!("/badge/{full_name}")) alt=(format!("afterglow pill for {full_name}")) height="20";
             }
-            pre { code { "![stars](" (HOST) "/badge/" (full_name) ")" } }
+            (snippet(embed_markdown(full_name)))
+            p { "Or the card, which follows each reader's theme:" }
+            (snippet(card_picture(full_name)))
         },
         // Queued covers a spent budget and a GitHub we could not reach, so the
         // wording claims neither.
@@ -452,6 +496,9 @@ fn shell(title: &str, here: &str, body: Markup, through: Option<&str>) -> Markup
                     main { (body) }
                     (attribution(through))
                 }
+                // The clipboard script, from /static/ so the CSP stays free of
+                // anything inline. The page reads fine without it.
+                script src=(COPY_JS_URL) defer {}
             }
         }
     }

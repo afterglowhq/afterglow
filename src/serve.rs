@@ -110,15 +110,22 @@ pub const APRIL_2025_URL: &str = "/april-2025";
 /// dashboard, not here.
 const ROBOTS: &str = include_str!("../static/robots.txt");
 
+/// The clipboard button on embed snippets: the one script a page loads, served
+/// as a file so the CSP can stay on `script-src 'self'` with nothing inline.
+const COPY_JS: &str = include_str!("../static/copy.js");
+pub const COPY_JS_URL: &str = "/static/copy.js";
+
 /// Two years of HTTPS-only, and deliberately no `preload` token: that token is a
 /// claim that the domain is submitted to the browser preload list, and it is not.
 const HSTS: &str = "max-age=63072000; includeSubDomains";
 
 /// What a page actually loads: its own images, its own font, the stylesheet that
-/// ships inline in a `<style>` element, and a form that posts back to us. No
-/// script anywhere, so `default-src 'none'` is the floor everything else sits on.
+/// ships inline in a `<style>` element, the clipboard script served from /static/,
+/// and a form that posts back to us. `default-src 'none'` is the floor everything
+/// else sits on, and nothing inline can run.
 const PAGE_CSP: &str = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; \
-     font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+     script-src 'self'; font-src 'self'; form-action 'self'; base-uri 'none'; \
+     frame-ancestors 'none'";
 
 /// Everything else we serve fetches nothing: the badge SVGs carry no `<style>`
 /// element and no `style` attribute, and the font, the icons and the 404 are bytes.
@@ -288,6 +295,7 @@ fn router(state: Arc<AppState>) -> Router {
             get(|| async { icon(TOUCH_ICON, "image/png") }),
         )
         .route("/robots.txt", get(robots))
+        .route(COPY_JS_URL, get(copy_js))
         .fallback(missing)
         .layer(map_response(secure))
         .with_state(state)
@@ -421,6 +429,20 @@ fn icon(bytes: &'static [u8], mime: &'static str) -> Response {
             (header::CACHE_CONTROL, HeaderValue::from_static(ICON_CACHE)),
         ],
         bytes,
+    )
+        .into_response()
+}
+
+async fn copy_js() -> Response {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/javascript; charset=utf-8"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static(ICON_CACHE)),
+        ],
+        COPY_JS,
     )
         .into_response()
 }
@@ -1745,8 +1767,13 @@ mod tests {
             assert!(page.body.contains("Source: GitHub public API"), "{uri}");
             assert!(page.body.contains("not affiliated with GitHub"), "{uri}");
             assert!(page.body.contains("snapshots through 20"), "{uri}");
-            // Server-rendered, and it stays that way.
-            assert!(!page.body.contains("<script"), "{uri}");
+            // Server-rendered, and it stays that way: the one script is the
+            // clipboard button, loaded as a file, and nothing runs inline.
+            assert_eq!(page.body.matches("<script").count(), 1, "{uri}");
+            assert!(
+                page.body.contains(&format!(r#"<script src="{COPY_JS_URL}" defer>"#)),
+                "{uri}"
+            );
         }
 
         // The moat claim, in the wording the spec pins it to.
@@ -1767,6 +1794,15 @@ mod tests {
         assert_eq!(font.cache_control, "public, max-age=31536000, immutable");
         assert_eq!(font.bytes, MONA_SANS);
         assert!(index.contains(FONT_URL), "{index}");
+
+        // The clipboard script rides the same /static/ prefix as the font, and
+        // the page CSP that allows it still allows nothing inline.
+        let js = h.get(COPY_JS_URL);
+        assert_eq!(js.status, StatusCode::OK);
+        assert_eq!(js.content_type, "text/javascript; charset=utf-8");
+        assert_eq!(js.cache_control, ICON_CACHE);
+        assert!(js.body.contains("navigator.clipboard"));
+        assert!(PAGE_CSP.contains("script-src 'self'"));
 
         let missing = h.get("/favicon.ico");
         assert_eq!(missing.status, StatusCode::NOT_FOUND);
@@ -1829,7 +1865,8 @@ mod tests {
             assert_eq!(
                 page.header("content-security-policy"),
                 "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; \
-                 font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+                 script-src 'self'; font-src 'self'; form-action 'self'; base-uri 'none'; \
+                 frame-ancestors 'none'",
                 "{uri}"
             );
             assert_eq!(page.header("x-frame-options"), "DENY", "{uri}");
