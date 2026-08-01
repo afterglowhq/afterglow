@@ -306,8 +306,8 @@ pub fn rankings(board: &Board, sort: Sort) -> Markup {
             "Every repo from 2,000 stars we can measure, by stars per day, plus anything "
             "tracked because somebody asked. The store is wider than this page: we follow "
             "young repos from 500 stars up, and a percentile reads against that whole "
-            "tracked set, shown here or not. Grey rows are young repos ranked on a lifetime "
-            "average, which is a weaker claim and looks like one. The sparklines here fill in a "
+            "tracked set, shown here or not. Grey rows are young repos on a lifetime average, "
+            "a weaker claim that looks like one and sits under every measured row. The sparklines here fill in a "
             "day at a time: we started collecting on 30 July 2026. If you want a preview of how "
             "a whole month of data looks, see " a href=(APRIL_2025_URL) { "April 2025, replayed" }
             "."

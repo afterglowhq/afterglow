@@ -947,13 +947,18 @@ pub enum RowVelocity {
 }
 
 impl RowVelocity {
-    /// What the row ranks on. A proxy number is not a measured one, but it is the
-    /// best claim that repo has, so it takes its place in the same list.
+    /// What the row ranks on within its tier. A proxy average is the best claim
+    /// a repo has, but it is a guess about a rate, not a rate somebody measured,
+    /// so it never outranks one (ticket 024).
     fn per_day(&self) -> i64 {
         match *self {
             RowVelocity::Measured { per_day, .. } => per_day,
             RowVelocity::Proxy { avg } => avg,
         }
+    }
+
+    fn is_proxy(&self) -> bool {
+        matches!(self, RowVelocity::Proxy { .. })
     }
 }
 
@@ -1021,10 +1026,14 @@ fn board(conn: &Connection, now: i64) -> Result<Board> {
         });
     }
 
+    // Measured rows first, whatever their rate: a repo enrolled this morning
+    // does not top the board on a lifetime guess, it earns its rank tomorrow
+    // when it measures.
     rows.sort_by(|a, b| {
-        b.velocity
-            .per_day()
-            .cmp(&a.velocity.per_day())
+        a.velocity
+            .is_proxy()
+            .cmp(&b.velocity.is_proxy())
+            .then_with(|| b.velocity.per_day().cmp(&a.velocity.per_day()))
             .then_with(|| a.full_name.cmp(&b.full_name))
     });
     // Every row above the floor, not a top hundred: a card reading "top 80%
@@ -1986,6 +1995,29 @@ mod tests {
         // The rocket's card still measures, floor or no floor.
         let card = h.get("/badge/small/rocket?style=card").body;
         assert!(card.contains("top 33% velocity"), "{card}");
+        assert_eq!(h.calls(), 0);
+    }
+
+    /// A lifetime average is a guess about a rate, not a rate somebody measured,
+    /// so a repo enrolled this morning sits under every measured row however
+    /// large its average. It earns its rank when it measures (ticket 024).
+    #[test]
+    fn a_proxy_row_never_tops_a_measured_one() {
+        let h = harness(vec![]);
+        // Measured and modest: 100 a day.
+        measured(&h, 1, "old/steady");
+        // Enrolled today, three days old, 9,000 stars: a 3,000-a-day average.
+        h.track(2, "new/rocket", 0, Some(24 * 3));
+        h.snapshot(2, 0, 9_000);
+
+        let board = h.get("/rankings").body;
+        let rank = |name: &str| board.find(name).expect(name);
+        assert!(rank("old/steady") < rank("new/rocket"), "{board}");
+
+        // The stars order stays star counts, no tiers.
+        let stars = h.get("/rankings?sort=stars").body;
+        let rank = |name: &str| stars.find(name).expect(name);
+        assert!(rank("new/rocket") < rank("old/steady"), "{stars}");
         assert_eq!(h.calls(), 0);
     }
 
