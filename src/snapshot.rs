@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rusqlite::params;
 
-use crate::github::{GitHub, SearchItem};
+use crate::github::{GRAPHQL_BATCH, GitHub, Probe, SearchItem};
 use crate::plural;
 use crate::serve::{EMBED_DAILY_BUDGET, MANUAL_DAILY_BUDGET};
 use crate::store::{
@@ -120,10 +120,11 @@ fn drain_queue(store: &mut Store, gh: &GitHub, ts: &str) -> Result<()> {
 
 /// Everything active the scan did not just refresh: enrolled, imported and manual
 /// repos, plus scan repos that aged out of the search window. No series ends
-/// silently (ADR-002), so each one costs a per-repo GET.
+/// silently (ADR-002).
 ///
-/// Per-repo GETs are the entire cost of this pass and fine at hundreds
-/// of repos; the 50k star-floor tier will take most of this over once it's built.
+/// Batched GraphQL: ~100 repos a query for one rate-limit point of 5,000 an
+/// hour, so the whole pass stays a handful of points a day well past any
+/// population the enrollment budgets can reach.
 fn sweep(store: &mut Store, gh: &GitHub, now: i64, ts: &str) -> Result<()> {
     let cutoff = iso8601_utc(now - STALE_AFTER_HOURS * 3600);
     let stale: Vec<(i64, String, String)> = {
@@ -134,20 +135,28 @@ fn sweep(store: &mut Store, gh: &GitHub, now: i64, ts: &str) -> Result<()> {
         rows.collect::<rusqlite::Result<_>>()?
     };
     let (mut swept, mut inactive) = (0usize, 0usize);
-    for (id, full_name, lane) in &stale {
-        match gh.repo(full_name) {
-            // Renames heal here: the row is keyed by id, so the name just moves.
-            Ok(Some(repo)) => {
-                record_repo(&store.conn, &repo, lane, ts)?;
-                swept += 1;
-            }
-            Ok(None) => {
-                store.conn.execute(MARK_INACTIVE, params![id])?;
-                inactive += 1;
-            }
+    for chunk in stale.chunks(GRAPHQL_BATCH) {
+        let names: Vec<&str> = chunk.iter().map(|(_, name, _)| name.as_str()).collect();
+        let probes = match gh.repos_batch(&names) {
+            Ok(probes) => probes,
+            // The unswept stay stale and are due again tomorrow (ADR-002).
             Err(e) => {
-                eprintln!("sweep stopped at {full_name}: {e:#}");
+                eprintln!("sweep stopped at the batch holding {}: {e:#}", names[0]);
                 break;
+            }
+        };
+        for ((id, full_name, lane), probe) in chunk.iter().zip(probes) {
+            match probe {
+                // Renames heal here: the row is keyed by id, so the name just moves.
+                Probe::Found(repo) => {
+                    record_repo(&store.conn, &repo, lane, ts)?;
+                    swept += 1;
+                }
+                Probe::Gone => {
+                    store.conn.execute(MARK_INACTIVE, params![id])?;
+                    inactive += 1;
+                }
+                Probe::Undecided => eprintln!("sweep: no verdict on {full_name}, kept as due"),
             }
         }
     }
@@ -184,7 +193,7 @@ fn scan(gh: &GitHub, now: i64) -> Result<HashMap<i64, SearchItem>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::{repo_json, stub};
+    use crate::github::{graphql_node, repo_json, stub};
     use crate::store::QUEUE_ENROLLMENT;
     use crate::time::parse_iso8601_utc;
     use std::sync::atomic::Ordering;
@@ -376,16 +385,19 @@ mod tests {
         snapshot(&s, 2, "2026-07-30T23:00:00Z", 50);
         track(&s, 3, "z/gone", "embed");
 
-        let (base, hits) = stub(vec![
-            (200, repo_json(1, "a/renamed", 140, "2026-01-01T00:00:00Z")),
-            (404, "{}".to_string()),
-        ]);
+        // Both stale repos ride one batched request; a/stale is r0 and z/gone
+        // is r1 because the stale list is ordered by name.
+        let body = format!(
+            r#"{{"data":{{"r0":{},"r1":null}},"errors":[{{"type":"NOT_FOUND","path":["r1"],"message":"gone"}}]}}"#,
+            graphql_node(1, "a/renamed", 140, "2026-01-01T00:00:00Z")
+        );
+        let (base, hits) = stub(vec![(200, body)]);
         let now = parse_iso8601_utc(NOW).expect("a fixed now");
 
         sweep(&mut s, &GitHub::at(&base), now, NOW).unwrap();
 
-        // The one snapshotted an hour ago was not worth an API call.
-        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        // One request for the two due repos; the fresh one was not worth asking about.
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
         // A rename heals onto the same id and the series just continues.
         assert_eq!(
             scalar::<String>(&s, "SELECT full_name FROM repos WHERE id = 1"),
@@ -412,5 +424,51 @@ mod tests {
             "inactive"
         );
         assert_eq!(scalar::<i64>(&s, "SELECT COUNT(*) FROM snapshots"), 3);
+    }
+
+    /// 101 due repos take two batched requests, and every one gets its row.
+    #[test]
+    fn the_sweep_chunks_past_one_batch() {
+        let mut s = store();
+        for i in 1i64..=101 {
+            track(&s, i, &format!("o{i:03}/x"), "scan");
+        }
+        let node = |i: i64| graphql_node(i, &format!("o{i:03}/x"), 10 * i, "2026-01-01T00:00:00Z");
+        let first: Vec<String> = (1..=100)
+            .map(|i| format!(r#""r{}":{}"#, i - 1, node(i)))
+            .collect();
+        let (base, hits) = stub(vec![
+            (200, format!(r#"{{"data":{{{}}}}}"#, first.join(","))),
+            (200, format!(r#"{{"data":{{"r0":{}}}}}"#, node(101))),
+        ]);
+        let now = parse_iso8601_utc(NOW).expect("a fixed now");
+
+        sweep(&mut s, &GitHub::at(&base), now, NOW).unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(scalar::<i64>(&s, "SELECT COUNT(*) FROM snapshots"), 101);
+        assert_eq!(
+            scalar::<i64>(&s, "SELECT stars FROM snapshots WHERE repo_id = 101"),
+            1010
+        );
+    }
+
+    /// A DMCA block answers without deciding anything: the repo is neither
+    /// refreshed nor retired, and comes up due again tomorrow.
+    #[test]
+    fn a_blocked_repo_is_neither_refreshed_nor_retired() {
+        let mut s = store();
+        track(&s, 7, "d/dmca", "scan");
+        let body = r#"{"data":{"r0":null},"errors":[{"type":"FORBIDDEN","path":["r0"],"message":"dmca"}]}"#;
+        let (base, _) = stub(vec![(200, body.to_string())]);
+        let now = parse_iso8601_utc(NOW).expect("a fixed now");
+
+        sweep(&mut s, &GitHub::at(&base), now, NOW).unwrap();
+
+        assert_eq!(
+            scalar::<String>(&s, "SELECT status FROM repos WHERE id = 7"),
+            "active"
+        );
+        assert_eq!(scalar::<i64>(&s, "SELECT COUNT(*) FROM snapshots"), 0);
     }
 }

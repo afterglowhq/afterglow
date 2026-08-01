@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -12,6 +13,10 @@ const API: &str = "https://api.github.com";
 const USER_AGENT: &str = "afterglow";
 const MAX_ATTEMPTS: u32 = 6;
 const MAX_BACKOFF: Duration = Duration::from_secs(900);
+
+/// Aliased repos per GraphQL query. GitHub's cost formula rounds a query this
+/// size down to a single rate-limit point (verified against the live API).
+pub const GRAPHQL_BATCH: usize = 100;
 
 /// `stargazers_count` carries no default on purpose: a response we cannot read a
 /// star count out of is a decode error, never a snapshot row claiming zero stars.
@@ -52,6 +57,17 @@ pub struct SearchItem {
 #[derive(Deserialize)]
 struct SearchPage {
     items: Vec<SearchItem>,
+}
+
+/// One repo's verdict out of a batched probe. `Gone` is a definite NOT_FOUND
+/// and nothing else: any other per-repo error (a DMCA block, a transient
+/// resolver failure) stays `Undecided`, because retiring a series needs a
+/// definite answer.
+#[derive(Debug)]
+pub enum Probe {
+    Found(Repo),
+    Gone,
+    Undecided,
 }
 
 pub struct GitHub {
@@ -115,17 +131,88 @@ impl GitHub {
         Ok(page.items)
     }
 
+    /// Up to [`GRAPHQL_BATCH`] repos resolved in one GraphQL query for one
+    /// rate-limit point, where REST would spend a GET each. Verdicts come back
+    /// in input order. Renames resolve through their old name here exactly as
+    /// they do through REST's 301.
+    pub fn repos_batch(&self, names: &[&str]) -> Result<Vec<Probe>> {
+        let mut query = String::from("query {\n");
+        for (i, name) in names.iter().enumerate() {
+            // Tracked names all came back from GitHub, but this one is about to
+            // be spliced into a query string: refuse anything off-charset.
+            let legal = |c: char| c.is_ascii_alphanumeric() || "-._".contains(c);
+            let Some((owner, repo)) = name.split_once('/').filter(|(o, r)| {
+                !o.is_empty() && !r.is_empty() && o.chars().chain(r.chars()).all(legal)
+            }) else {
+                bail!("{name} is not a legal owner/name, refusing to query it");
+            };
+            query.push_str(&format!(
+                "r{i}: repository(owner: \"{owner}\", name: \"{repo}\") {{ \
+                 databaseId nameWithOwner createdAt pushedAt stargazerCount forkCount \
+                 issues(states: OPEN) {{ totalCount }} pullRequests(states: OPEN) {{ totalCount }} \
+                 watchers {{ totalCount }} primaryLanguage {{ name }} }}\n"
+            ));
+        }
+        query.push('}');
+
+        let url = format!("{}/graphql", self.base);
+        let Some(resp) = self.send(&format!("POST {url}"), || {
+            self.http
+                .post(&url)
+                .json(&serde_json::json!({ "query": query }))
+        })?
+        else {
+            bail!("POST {url} -> 404");
+        };
+        let payload: serde_json::Value = resp.json().with_context(|| format!("decoding {url}"))?;
+
+        let errors = payload["errors"].as_array().cloned().unwrap_or_default();
+        let data = &payload["data"];
+        if data.is_null() {
+            // The whole query was refused (RATE_LIMITED and friends): no
+            // verdict on anyone, the caller tries again another day.
+            let why = errors
+                .first()
+                .and_then(|e| e["message"].as_str())
+                .unwrap_or("no error given");
+            bail!("POST {url}: no data ({why})");
+        }
+        let verdicts: HashMap<&str, &str> = errors
+            .iter()
+            .filter_map(|e| Some((e["path"][0].as_str()?, e["type"].as_str()?)))
+            .collect();
+
+        (0..names.len())
+            .map(|i| {
+                let alias = format!("r{i}");
+                let node = &data[alias.as_str()];
+                if !node.is_null() {
+                    Ok(Probe::Found(repo_from_node(node)?))
+                } else if verdicts.get(alias.as_str()) == Some(&"NOT_FOUND") {
+                    Ok(Probe::Gone)
+                } else {
+                    Ok(Probe::Undecided)
+                }
+            })
+            .collect()
+    }
+
     fn get(&self, url: &str, params: &[(&str, String)]) -> Result<Option<Response>> {
+        self.send(&format!("GET {url}"), || self.http.get(url).query(params))
+    }
+
+    fn send(
+        &self,
+        what: &str,
+        build: impl Fn() -> reqwest::blocking::RequestBuilder,
+    ) -> Result<Option<Response>> {
         for attempt in 0..MAX_ATTEMPTS {
-            let resp = self
-                .http
-                .get(url)
-                .query(params)
+            let resp = build()
                 .bearer_auth(&self.token)
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .send()
-                .with_context(|| format!("GET {url}"))?;
+                .with_context(|| what.to_string())?;
 
             let status = resp.status();
             if status.is_success() {
@@ -136,7 +223,7 @@ impl GitHub {
             }
             if let Some(wait) = backoff(status, resp.headers(), attempt, now_unix()) {
                 eprintln!(
-                    "github: {status} on {url}, waiting {}s",
+                    "github: {status} on {what}, waiting {}s",
                     wait.as_secs().max(1)
                 );
                 std::thread::sleep(wait);
@@ -144,12 +231,48 @@ impl GitHub {
             }
             let body = resp.text().unwrap_or_default();
             bail!(
-                "GET {url} -> {status}: {}",
+                "{what} -> {status}: {}",
                 body.trim().chars().take(300).collect::<String>()
             );
         }
-        bail!("GET {url}: still rate-limited after {MAX_ATTEMPTS} attempts")
+        bail!("{what}: still rate-limited after {MAX_ATTEMPTS} attempts")
     }
+}
+
+/// A GraphQL repository node reshaped into the REST [`Repo`], preserving REST's
+/// meanings: `open_issues_count` counts open issues plus open PRs, and
+/// `subscribers_count` is what GraphQL calls watchers.
+fn repo_from_node(node: &serde_json::Value) -> Result<Repo> {
+    let text = |field: &str| -> Result<String> {
+        node[field]
+            .as_str()
+            .map(str::to_string)
+            .with_context(|| format!("graphql node has no {field}: {node}"))
+    };
+    let count = |field: &str| node[field]["totalCount"].as_i64();
+    Ok(Repo {
+        // Repository only offers the Int-typed databaseId; ids sat at ~1.2e9 in
+        // mid-2026, so the 2^31 ceiling is years off. When GitHub adds
+        // fullDatabaseId to Repository (Issue and PullRequest have it), take it.
+        id: node["databaseId"]
+            .as_i64()
+            .with_context(|| format!("graphql node has no databaseId: {node}"))?,
+        full_name: text("nameWithOwner")?,
+        created_at: text("createdAt")?,
+        // Same no-default rule as the REST decode: no star count is an error,
+        // never a zero.
+        stargazers_count: node["stargazerCount"]
+            .as_i64()
+            .with_context(|| format!("graphql node has no stargazerCount: {node}"))?,
+        forks_count: node["forkCount"].as_i64(),
+        open_issues_count: match (count("issues"), count("pullRequests")) {
+            (Some(issues), Some(prs)) => Some(issues + prs),
+            _ => None,
+        },
+        subscribers_count: count("watchers"),
+        pushed_at: node["pushedAt"].as_str().map(str::to_string),
+        language: node["primaryLanguage"]["name"].as_str().map(str::to_string),
+    })
 }
 
 /// How long to wait before retrying, or `None` if the response is a hard failure.
@@ -202,6 +325,14 @@ pub fn stub(
             while !request.ends_with(b"\r\n\r\n") && matches!(sock.read(&mut byte), Ok(1)) {
                 request.push(byte[0]);
             }
+            // Drain a POST body too, or closing early resets the client mid-write.
+            let head = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            let body_len = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|len| len.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let _ = sock.read_exact(&mut vec![0u8; body_len]);
             let Some((status, body)) = canned.next() else {
                 // Out of responses: hang up, so an unexpected call fails at once
                 // instead of hanging the test on a timeout.
@@ -222,6 +353,15 @@ pub fn stub(
 pub fn repo_json(id: i64, full_name: &str, stars: i64, created_at: &str) -> String {
     format!(
         r#"{{"id":{id},"full_name":"{full_name}","created_at":"{created_at}","stargazers_count":{stars},"forks_count":3,"open_issues_count":4,"subscribers_count":5,"pushed_at":"{created_at}","language":"Rust"}}"#
+    )
+}
+
+/// The GraphQL twin of [`repo_json`]: same repo, same derived counts (1 issue +
+/// 3 PRs is REST's 4), so tests can swap transports without moving assertions.
+#[cfg(test)]
+pub fn graphql_node(id: i64, full_name: &str, stars: i64, created_at: &str) -> String {
+    format!(
+        r#"{{"databaseId":{id},"nameWithOwner":"{full_name}","createdAt":"{created_at}","pushedAt":"{created_at}","stargazerCount":{stars},"forkCount":3,"issues":{{"totalCount":1}},"pullRequests":{{"totalCount":3}},"watchers":{{"totalCount":5}},"primaryLanguage":{{"name":"Rust"}}}}"#
     )
 }
 
@@ -296,6 +436,47 @@ mod tests {
         // Out of canned responses: the call is seen and then refused, never hung.
         assert!(gh.repo("a/b").is_err());
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_batch_probe_sorts_found_gone_and_blocked() {
+        let body = format!(
+            r#"{{"data":{{"r0":{},"r1":null,"r2":null}},"errors":[{{"type":"NOT_FOUND","path":["r1"],"message":"gone"}},{{"type":"FORBIDDEN","path":["r2"],"message":"dmca"}}]}}"#,
+            graphql_node(9, "a/renamed", 12, "2026-01-02T03:04:05Z")
+        );
+        let (base, hits) = stub(vec![(200, body)]);
+        let gh = GitHub::at(&base);
+
+        let probes = gh.repos_batch(&["a/b", "c/d", "e/f"]).unwrap();
+
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let Probe::Found(repo) = &probes[0] else {
+            panic!("expected Found, got {:?}", probes[0]);
+        };
+        assert_eq!((repo.id, repo.stargazers_count), (9, 12));
+        assert_eq!(repo.full_name, "a/renamed");
+        // REST's open_issues_count means issues plus PRs; the reshape keeps that.
+        assert_eq!(repo.open_issues_count, Some(4));
+        assert_eq!(repo.subscribers_count, Some(5));
+        assert_eq!(repo.pushed_at.as_deref(), Some("2026-01-02T03:04:05Z"));
+        assert_eq!(repo.language.as_deref(), Some("Rust"));
+        assert!(matches!(probes[1], Probe::Gone));
+        // Blocked is not gone: no verdict, never a retirement.
+        assert!(matches!(probes[2], Probe::Undecided));
+    }
+
+    #[test]
+    fn a_refused_query_and_an_illegal_name_are_errors_not_verdicts() {
+        let refused = r#"{"data":null,"errors":[{"type":"RATE_LIMITED","message":"slow down"}]}"#;
+        let (base, hits) = stub(vec![(200, refused.to_string())]);
+        let gh = GitHub::at(&base);
+
+        // An off-charset name is refused before any request is built.
+        assert!(gh.repos_batch(&[r#"evil"} x: viewer {login"#]).is_err());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let err = gh.repos_batch(&["a/b"]).unwrap_err();
+        assert!(err.to_string().contains("slow down"), "{err}");
     }
 
     #[test]
