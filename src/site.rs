@@ -11,7 +11,7 @@ use crate::badge::{self, STAR};
 use crate::language;
 use crate::serve::{
     APRIL_2025_URL, Board, BoardRow, COPY_JS_URL, FONT_URL, ICON_PNG_URL, ICON_SVG_URL, MINI_SPARK,
-    MINI_SPARK_HEIGHT, Outcome, RowVelocity, Sort, TOUCH_ICON_URL,
+    MINI_SPARK_HEIGHT, Outcome, RowVelocity, SOCIAL_CARD_URL, Sort, TOUCH_ICON_URL,
 };
 
 const HOST: &str = "https://afterglow.watch";
@@ -503,6 +503,18 @@ fn shell(title: &str, here: &str, body: Markup, through: Option<&str>) -> Markup
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) }
                 meta name="description" content=(DESCRIPTION);
+                // The link preview: one fixed card for every page, served from
+                // /static/ like the icons so the edge cache rule covers it.
+                meta property="og:site_name" content="Afterglow";
+                meta property="og:type" content="website";
+                meta property="og:title" content=(title);
+                meta property="og:description" content=(DESCRIPTION);
+                meta property="og:url" content=(format!("{HOST}{here}"));
+                meta property="og:image" content=(format!("{HOST}{SOCIAL_CARD_URL}"));
+                meta property="og:image:width" content="1200";
+                meta property="og:image:height" content="630";
+                meta property="og:image:alt" content="afterglow: star velocity, measured daily";
+                meta name="twitter:card" content="summary_large_image";
                 link rel="preload" href=(FONT_URL) as="font" type="font/woff2" crossorigin;
                 // Safari ignores an SVG favicon, so the PNG is the one it uses.
                 link rel="icon" type="image/svg+xml" href=(ICON_SVG_URL);

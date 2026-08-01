@@ -96,6 +96,9 @@ const TOUCH_ICON: &[u8] = include_bytes!("../assets/afterglow-avatar-512.png");
 pub const ICON_SVG_URL: &str = "/static/favicon.svg";
 pub const ICON_PNG_URL: &str = "/static/favicon-96.png";
 pub const TOUCH_ICON_URL: &str = "/static/apple-touch-icon.png";
+/// The 1200x630 link-preview render; the pages name it in their og: tags.
+const SOCIAL_CARD: &[u8] = include_bytes!("../assets/social-card.png");
+pub const SOCIAL_CARD_URL: &str = "/static/social-card.png";
 /// A tab icon moves when the brand does, which is not on any schedule.
 const ICON_CACHE: &str = "public, max-age=86400";
 
@@ -294,6 +297,10 @@ fn router(state: Arc<AppState>) -> Router {
         .route(
             TOUCH_ICON_URL,
             get(|| async { icon(TOUCH_ICON, "image/png") }),
+        )
+        .route(
+            SOCIAL_CARD_URL,
+            get(|| async { icon(SOCIAL_CARD, "image/png") }),
         )
         .route("/robots.txt", get(robots))
         .route(COPY_JS_URL, get(copy_js))
@@ -2008,6 +2015,18 @@ mod tests {
         assert!(replay.body.contains("Velocity, April 2025"));
         // Grey is the page's whole claim: neither theme's live gold appears.
         assert!(!replay.body.contains("#eac54f") && !replay.body.contains("#e3b341"));
+        // Link previews point at the one fixed card, here and on the live pages.
+        for uri in ["/", "/rankings", APRIL_2025_URL] {
+            let page = h.get(uri);
+            let card = format!(
+                "property=\"og:image\" content=\"https://afterglow.watch{SOCIAL_CARD_URL}\""
+            );
+            assert!(page.body.contains(&card), "{uri}: {}", page.body);
+            assert!(
+                page.body.contains("content=\"summary_large_image\""),
+                "{uri}"
+            );
+        }
         // Its font and icons are the site's own, inside the page CSP.
         assert!(replay.body.contains(FONT_URL) && replay.body.contains(ICON_SVG_URL));
         assert!(!replay.body.contains("data:"));
@@ -2030,6 +2049,7 @@ mod tests {
             (ICON_SVG_URL, "image/svg+xml", ICON_SVG),
             (ICON_PNG_URL, "image/png", ICON_PNG),
             (TOUCH_ICON_URL, "image/png", TOUCH_ICON),
+            (SOCIAL_CARD_URL, "image/png", SOCIAL_CARD),
         ] {
             let icon = h.get(uri);
             assert_eq!(icon.status, StatusCode::OK, "{uri}");
