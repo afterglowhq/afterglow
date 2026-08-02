@@ -276,34 +276,17 @@ pub fn index(board: &Board) -> Markup {
         }
         // Always the placeholder, never a real repo: this snippet is copied
         // more than it is read, and it must not paste as somebody else's badge.
+        // Every embed here keeps one rhythm: the snippet, then the live render
+        // it buys, then the fine print. A reader picks a badge by looking.
         (snippet(embed_markdown("OWNER/REPO")))
-        p.note {
-            "Swap OWNER/REPO for your own repo's name. Tracking a repo through the form "
-            "below answers with this snippet already filled in."
-        }
-        p {
-            "There is also the card, with its 30-day sparkline. The pill is one render "
-            "everywhere, the way the rest of the badge row is; the card comes in a light and "
-            "a dark cut, and this block serves each reader whichever their system asks for:"
-        }
-        (snippet(card_picture("OWNER/REPO")))
         @if let Some(name) = example {
             .examples {
                 img src=(format!("/badge/{name}")) alt=(format!("afterglow pill for {name}")) height="20";
-                // The card the way a themed README should ask for it, which is
-                // also the pattern the snippet above hands out.
-                picture {
-                    source media="(prefers-color-scheme: dark)"
-                        srcset=(format!("/badge/{name}?style=card&theme=dark"));
-                    img src=(format!("/badge/{name}?style=card"))
-                        alt=(format!("afterglow card for {name}")) width="420" height="150";
-                }
             }
         }
         p.note {
-            "That is GitHub's own pattern for theme-aware images, and it is the default way "
-            "to embed the card. A bare " code { "?style=card" } " URL stays light, and "
-            code { "?theme=dark" } " pins it dark, for a README that is one color on purpose."
+            "Swap OWNER/REPO for your own repo's name. Tracking a repo through the form "
+            "below answers with this snippet already filled in."
         }
         p {
             "If the rest of your badge row is in shields' " code { "for-the-badge" }
@@ -318,7 +301,30 @@ pub fn index(board: &Board) -> Markup {
         }
         p.note {
             "The words and colours stay the pill's own, amber for measured and grey for "
-            "anything weaker."
+            "anything weaker. Either pill is one render everywhere, the way the rest of "
+            "a badge row is."
+        }
+        p {
+            "There is also the card, with its 30-day sparkline. It comes in a light and "
+            "a dark cut, and this block serves each reader whichever their system asks for:"
+        }
+        (snippet(card_picture("OWNER/REPO")))
+        @if let Some(name) = example {
+            .examples {
+                // The card the way a themed README should ask for it, which is
+                // also the pattern the snippet above hands out.
+                picture {
+                    source media="(prefers-color-scheme: dark)"
+                        srcset=(format!("/badge/{name}?style=card&theme=dark"));
+                    img src=(format!("/badge/{name}?style=card"))
+                        alt=(format!("afterglow card for {name}")) width="420" height="150";
+                }
+            }
+        }
+        p.note {
+            "That is GitHub's own pattern for theme-aware images, and it is the default way "
+            "to embed the card. A bare " code { "?style=card" } " URL stays light, and "
+            code { "?theme=dark" } " pins it dark, for a README that is one color on purpose."
         }
         p {
             "Any other style shields draws, plastic to flat-square to colours of your "
@@ -472,10 +478,22 @@ pub fn enrolled(outcome: &Outcome) -> Markup {
                 img src=(format!("/badge/{full_name}")) alt=(format!("afterglow pill for {full_name}")) height="20";
             }
             (snippet(embed_markdown(full_name)))
-            p { "Or the card, which follows each reader's theme:" }
-            (snippet(card_picture(full_name)))
             p { "Or in for-the-badge:" }
             (snippet(ftb_markdown(full_name)))
+            .examples {
+                img src=(format!("/badge/{full_name}?style=for-the-badge"))
+                    alt=(format!("afterglow for-the-badge for {full_name}")) height="28";
+            }
+            p { "Or the card, which follows each reader's theme:" }
+            (snippet(card_picture(full_name)))
+            .examples {
+                picture {
+                    source media="(prefers-color-scheme: dark)"
+                        srcset=(format!("/badge/{full_name}?style=card&theme=dark"));
+                    img src=(format!("/badge/{full_name}?style=card"))
+                        alt=(format!("afterglow card for {full_name}")) width="420" height="150";
+                }
+            }
         },
         // Queued covers a spent budget and a GitHub we could not reach, so the
         // wording claims neither.
