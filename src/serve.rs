@@ -348,6 +348,7 @@ async fn secure(mut response: Response) -> Response {
 #[derive(Clone, Copy)]
 enum Shape {
     Pill,
+    ForTheBadge,
     Card(Theme),
 }
 
@@ -496,6 +497,7 @@ async fn canonical_badge(
     // An unreadable style falls back to the pill: this URL never gets to error.
     let shape = match q.get("style").map(String::as_str) {
         Some("card") => Shape::Card(theme_of(&q)),
+        Some("for-the-badge") => Shape::ForTheBadge,
         _ => Shape::Pill,
     };
     render(state, &format!("{owner}/{repo}"), shape).await
@@ -588,8 +590,10 @@ async fn render(state: Arc<AppState>, full_name: &str, shape: Shape) -> Response
     let shown = display_name(&name);
     let (svg, max_age) = match (&badge, shape) {
         (Some(b), Shape::Pill) => (badge::pill(b), max_age_for(b.state)),
+        (Some(b), Shape::ForTheBadge) => (badge::for_the_badge(b), max_age_for(b.state)),
         (Some(b), Shape::Card(theme)) => (badge::card(b, theme), max_age_for(b.state)),
         (None, Shape::Pill) => (badge::not_tracked_pill(&shown), FRESH_MAX_AGE),
+        (None, Shape::ForTheBadge) => (badge::not_tracked_for_the_badge(&shown), FRESH_MAX_AGE),
         (None, Shape::Card(theme)) => (badge::not_tracked_card(&shown, theme), FRESH_MAX_AGE),
     };
     svg_response(svg, max_age)
@@ -1577,6 +1581,25 @@ mod tests {
 
         // The pill is theme-invariant: one render everywhere.
         assert_eq!(h.get("/badge/o/r?theme=dark").body, pill.body);
+
+        let ftb = h.get("/badge/o/r?style=for-the-badge");
+        assert!(ftb.body.contains(r#"height="28""#), "{}", ftb.body);
+        assert!(ftb.body.contains("▲ 100/DAY"), "{}", ftb.body);
+        assert_eq!(ftb.cache_control, "public, max-age=3600");
+        // One render everywhere, like the pill.
+        assert_eq!(
+            h.get("/badge/o/r?style=for-the-badge&theme=dark").body,
+            ftb.body
+        );
+
+        // The home page shows the cut live, first-party, for the top repo.
+        let home = h.get("/");
+        assert!(
+            home.body
+                .contains(r#"src="/badge/o/r?style=for-the-badge""#),
+            "{}",
+            home.body
+        );
 
         let card = h.get("/badge/o/r?style=card");
         assert!(

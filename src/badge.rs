@@ -5,7 +5,7 @@
 //! renderer to the approved reference SVGs byte for byte, so the arithmetic below
 //! reproduces the reference generator's rounding exactly.
 
-use crate::widths::{HELVETICA_BOLD_20, VERDANA_11, VERDANA_11_KERN};
+use crate::widths::{HELVETICA_BOLD_20, VERDANA_10, VERDANA_10_BOLD, VERDANA_11, VERDANA_11_KERN};
 
 /// Octicon `star-fill`, unmodified. The leaderboard draws the same glyph.
 pub const STAR: &str = "M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z";
@@ -21,6 +21,11 @@ pub const NOT_TRACKED: &str = "not tracked";
 
 /// 5px pad + 12px octicon + 3px gap.
 const TEXT_LEFT: f64 = 20.0;
+
+/// shields' for-the-badge text margin.
+const FTB_MARGIN: f64 = 12.0;
+/// 9px logo margin + 14px star + 6px gutter, shields' logo arithmetic.
+const FTB_TEXT_LEFT: f64 = 29.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
@@ -137,6 +142,25 @@ pub fn state_value(b: &RepoBadge) -> (String, &'static str, String) {
             format!("afterglow: {count} stars, tracking paused"),
         ),
     }
+}
+
+/// The for-the-badge cut, drawn by us: shields' own arithmetic (caps, 12px
+/// text margins, 1.25px a char of letter-spacing folded into textLength,
+/// floored advance sums) over our measured Verdana 10 tables, so the badge
+/// sits flush in a README full of shields' renders with nobody else drawing ours.
+pub fn for_the_badge(b: &RepoBadge) -> String {
+    let (value, bg, aria) = state_value(b);
+    render_for_the_badge(&commas(b.stars), &value, bg, &aria)
+}
+
+pub fn not_tracked_for_the_badge(full_name: &str) -> String {
+    let name = xml_escape(full_name);
+    render_for_the_badge(
+        "afterglow",
+        NOT_TRACKED,
+        PROXY_GREY,
+        &not_tracked_aria(&name),
+    )
 }
 
 pub fn not_tracked_pill(full_name: &str) -> String {
@@ -366,6 +390,43 @@ fn render_pill(label: &str, value: &str, value_bg: &str, aria: &str) -> String {
 </g>
 </svg>"##
     )
+}
+
+fn render_for_the_badge(label: &str, value: &str, value_bg: &str, aria: &str) -> String {
+    // Caps first, then measure: widths come off the characters actually set.
+    let (label, value) = (label.to_uppercase(), value.to_uppercase());
+    let lw = ftb_width(&label, VERDANA_10);
+    let vw = ftb_width(&value, VERDANA_10_BOLD);
+    let label_w = FTB_TEXT_LEFT + lw + FTB_MARGIN;
+    let value_w = 2.0 * FTB_MARGIN + vw;
+    let w = label_w + value_w;
+    let lx = 10.0 * (FTB_TEXT_LEFT + lw / 2.0);
+    let vx = 10.0 * (label_w + FTB_MARGIN + vw / 2.0);
+    let (ltl, vtl) = (10.0 * lw, 10.0 * vw);
+    // Both texts white: shields' brightness threshold puts the label grey, the
+    // amber, and the proxy grey all on the white side, and the april replay
+    // exhibit already locked that look. Widths are quarter-pixel exact, so the
+    // default float formatting prints them shortest and round-trips.
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="28" role="img" aria-label="{aria}">
+<title>{aria}</title>
+<g shape-rendering="crispEdges">
+<rect width="{label_w}" height="28" fill="{LABEL_BG}"/>
+<rect x="{label_w}" width="{value_w}" height="28" fill="{value_bg}"/>
+</g>
+<path transform="translate(9,7) scale(0.875)" fill="{PILL_STAR}" d="{STAR}"/>
+<g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="100">
+<text x="{lx}" y="175" transform="scale(.1)" textLength="{ltl}">{label}</text>
+<text x="{vx}" y="175" transform="scale(.1)" textLength="{vtl}" font-weight="bold">{value}</text>
+</g>
+</svg>"##
+    )
+}
+
+/// shields' width step: floored advance sum plus 1.25px a character, the
+/// letter-spacing their renderer spreads through textLength.
+fn ftb_width(s: &str, table: &[(char, f64)]) -> f64 {
+    text_width(s, table, &[]).floor() + 1.25 * s.chars().count() as f64
 }
 
 /// The per-state pieces of the card; the box around them is fixed in every state.
@@ -615,6 +676,18 @@ mod tests {
     );
 
     golden!(
+        ftb_measured,
+        "ftb-measured.svg",
+        for_the_badge(&caveman(MEASURED))
+    );
+    golden!(ftb_e1_proxy, "ftb-e1-proxy.svg", for_the_badge(&kimi()));
+    golden!(
+        ftb_not_tracked,
+        "ftb-not-tracked.svg",
+        not_tracked_for_the_badge("JuliusBrussee/caveman")
+    );
+
+    golden!(
         card_measured_light,
         "card-measured-light.svg",
         card(&caveman(MEASURED), Theme::Light)
@@ -654,6 +727,34 @@ mod tests {
         "card-e3-enrollment-dark.svg",
         card(&caveman(BadgeState::Enrolled), Theme::Dark)
     );
+
+    #[test]
+    fn for_the_badge_wears_caps_and_the_pill_colours() {
+        let svg = for_the_badge(&caveman(MEASURED));
+        assert!(svg.contains(r#"height="28""#), "{svg}");
+        assert!(svg.contains(">94,590<"), "{svg}");
+        assert!(svg.contains(">▲ 807/DAY<"), "{svg}");
+        assert!(svg.contains(r##" fill="#d4a72c""##), "{svg}");
+        assert!(svg.contains(r#"shape-rendering="crispEdges""#), "{svg}");
+        assert!(svg.contains(r#"font-weight="bold""#), "{svg}");
+        // Squared corners and the 14px star in shields' logo slot.
+        assert!(!svg.contains("rx="), "{svg}");
+        assert!(svg.contains("translate(9,7) scale(0.875)"), "{svg}");
+        // The spoken line stays ours, in its own case.
+        assert!(
+            svg.contains(r#"aria-label="afterglow: 94,590 stars, gaining 807 per day""#),
+            "{svg}"
+        );
+
+        let svg = not_tracked_for_the_badge("JuliusBrussee/caveman");
+        assert!(svg.contains(">AFTERGLOW<"), "{svg}");
+        assert!(svg.contains(">NOT TRACKED<"), "{svg}");
+        assert!(svg.contains(r##" fill="#9f9f9f""##), "{svg}");
+        assert!(
+            svg.contains("afterglow: JuliusBrussee/caveman is not tracked"),
+            "{svg}"
+        );
+    }
 
     #[test]
     fn percentiles_keep_a_decimal_under_one() {
