@@ -5,8 +5,8 @@
 <rect x="115.25" width="116.75" height="28" fill="#9f9f9f"/>
 </g>
 <path transform="translate(9,7) scale(0.875)" fill="#eac54f" d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/>
-<g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="100">
-<text x="661.25" y="175" transform="scale(.1)" textLength="742.5">AFTERGLOW</text>
-<text x="1736.25" y="175" transform="scale(.1)" textLength="927.5" font-weight="bold">NOT TRACKED</text>
+<g text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="100">
+<text x="661.25" y="175" fill="#fff" transform="scale(.1)" textLength="742.5">AFTERGLOW</text>
+<text x="1736.25" y="175" fill="#24292f" transform="scale(.1)" textLength="927.5" font-weight="bold">NOT TRACKED</text>
 </g>
 </svg>

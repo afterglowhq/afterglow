@@ -163,6 +163,42 @@ pub fn not_tracked_for_the_badge(full_name: &str) -> String {
     )
 }
 
+/// The flat-square style: the pill's words, colours, and widths with the
+/// corner rounding and text shadows gone, so it sits flush in a README row
+/// that is already square.
+pub fn flat_square(b: &RepoBadge) -> String {
+    let (value, bg, aria) = state_value(b);
+    render_flat_square(&commas(b.stars), &value, bg, &aria)
+}
+
+pub fn not_tracked_flat_square(full_name: &str) -> String {
+    let name = xml_escape(full_name);
+    render_flat_square(
+        "afterglow",
+        NOT_TRACKED,
+        PROXY_GREY,
+        &not_tracked_aria(&name),
+    )
+}
+
+/// The social style: shields' Star-button geometry (rounded button, 6px gap,
+/// speech-bubble tail) in the pill's own colours and nothing else. Star and
+/// count in the button, the velocity alone in the bubble.
+pub fn social(b: &RepoBadge) -> String {
+    let (value, bg, aria) = state_value(b);
+    render_social(&commas(b.stars), &value, bg, &aria)
+}
+
+pub fn not_tracked_social(full_name: &str) -> String {
+    let name = xml_escape(full_name);
+    render_social(
+        "afterglow",
+        NOT_TRACKED,
+        PROXY_GREY,
+        &not_tracked_aria(&name),
+    )
+}
+
 pub fn not_tracked_pill(full_name: &str) -> String {
     let name = xml_escape(full_name);
     render_pill(
@@ -392,6 +428,61 @@ fn render_pill(label: &str, value: &str, value_bg: &str, aria: &str) -> String {
     )
 }
 
+fn render_social(label: &str, value: &str, value_bg: &str, aria: &str) -> String {
+    let lw = verdana(label);
+    let vw = verdana(value);
+    let label_w = round1(TEXT_LEFT + lw + 5.0);
+    let value_w = round1(5.0 + vw + 5.0);
+    // shields' social gap: the bubble floats 6px off the button, tail bridging.
+    let bx = round1(label_w + 6.0);
+    let w = round1(bx + value_w);
+    let lx = round_int((TEXT_LEFT + lw / 2.0) * 10.0);
+    let vx = round_int((bx + value_w / 2.0) * 10.0);
+    let ltl = round_int(lw * 10.0);
+    let vtl = round_int(vw * 10.0);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w:.1}" height="20" role="img" aria-label="{aria}">
+<title>{aria}</title>
+<rect width="{label_w:.1}" height="20" rx="2" fill="{LABEL_BG}"/>
+<path d="M{bx:.1} 6.5 l-3 3 v1 l3 3" fill="{value_bg}"/>
+<rect x="{bx:.1}" width="{value_w:.1}" height="20" rx="2" fill="{value_bg}"/>
+<path transform="translate(5,4) scale(0.75)" fill="{PILL_STAR}" d="{STAR}"/>
+<g text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="110" text-rendering="geometricPrecision">
+<text aria-hidden="true" x="{lx}" y="150" fill="#010101" fill-opacity=".3" transform="scale(.1)" textLength="{ltl}">{label}</text>
+<text x="{lx}" y="140" fill="#fff" transform="scale(.1)" textLength="{ltl}">{label}</text>
+<text aria-hidden="true" x="{vx}" y="150" fill="#ccc" fill-opacity=".3" transform="scale(.1)" textLength="{vtl}">{value}</text>
+<text x="{vx}" y="140" fill="{VALUE_FG}" transform="scale(.1)" textLength="{vtl}">{value}</text>
+</g>
+</svg>"##
+    )
+}
+
+fn render_flat_square(label: &str, value: &str, value_bg: &str, aria: &str) -> String {
+    let lw = verdana(label);
+    let vw = verdana(value);
+    let label_w = round1(TEXT_LEFT + lw + 5.0);
+    let value_w = round1(5.0 + vw + 5.0);
+    let w = round1(label_w + value_w);
+    let lx = round_int((TEXT_LEFT + lw / 2.0) * 10.0);
+    let vx = round_int((label_w + value_w / 2.0) * 10.0);
+    let ltl = round_int(lw * 10.0);
+    let vtl = round_int(vw * 10.0);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w:.1}" height="20" role="img" aria-label="{aria}">
+<title>{aria}</title>
+<g shape-rendering="crispEdges">
+<rect width="{label_w:.1}" height="20" fill="{LABEL_BG}"/>
+<rect x="{label_w:.1}" width="{value_w:.1}" height="20" fill="{value_bg}"/>
+</g>
+<path transform="translate(5,4) scale(0.75)" fill="{PILL_STAR}" d="{STAR}"/>
+<g text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="110" text-rendering="geometricPrecision">
+<text x="{lx}" y="140" fill="#fff" transform="scale(.1)" textLength="{ltl}">{label}</text>
+<text x="{vx}" y="140" fill="{VALUE_FG}" transform="scale(.1)" textLength="{vtl}">{value}</text>
+</g>
+</svg>"##
+    )
+}
+
 fn render_for_the_badge(label: &str, value: &str, value_bg: &str, aria: &str) -> String {
     // Caps first, then measure: widths come off the characters actually set.
     let (label, value) = (label.to_uppercase(), value.to_uppercase());
@@ -403,10 +494,11 @@ fn render_for_the_badge(label: &str, value: &str, value_bg: &str, aria: &str) ->
     let lx = 10.0 * (FTB_TEXT_LEFT + lw / 2.0);
     let vx = 10.0 * (label_w + FTB_MARGIN + vw / 2.0);
     let (ltl, vtl) = (10.0 * lw, 10.0 * vw);
-    // Both texts white: shields' brightness threshold puts the label grey, the
-    // amber, and the proxy grey all on the white side, and the april replay
-    // exhibit already locked that look. Widths are quarter-pixel exact, so the
-    // default float formatting prints them shortest and round-trips.
+    // The pill's text scheme, not shields' brightness threshold: white label on
+    // the grey, dark value on the amber, so every style of the badge reads as
+    // one object. Dark on amber also clears AA contrast; white never did.
+    // Widths are quarter-pixel exact, so the default float formatting prints
+    // them shortest and round-trips.
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="28" role="img" aria-label="{aria}">
 <title>{aria}</title>
@@ -415,9 +507,9 @@ fn render_for_the_badge(label: &str, value: &str, value_bg: &str, aria: &str) ->
 <rect x="{label_w}" width="{value_w}" height="28" fill="{value_bg}"/>
 </g>
 <path transform="translate(9,7) scale(0.875)" fill="{PILL_STAR}" d="{STAR}"/>
-<g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="100">
-<text x="{lx}" y="175" transform="scale(.1)" textLength="{ltl}">{label}</text>
-<text x="{vx}" y="175" transform="scale(.1)" textLength="{vtl}" font-weight="bold">{value}</text>
+<g text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="100">
+<text x="{lx}" y="175" fill="#fff" transform="scale(.1)" textLength="{ltl}">{label}</text>
+<text x="{vx}" y="175" fill="{VALUE_FG}" transform="scale(.1)" textLength="{vtl}" font-weight="bold">{value}</text>
 </g>
 </svg>"##
     )
@@ -676,6 +768,30 @@ mod tests {
     );
 
     golden!(
+        fs_measured,
+        "fs-measured.svg",
+        flat_square(&caveman(MEASURED))
+    );
+    golden!(fs_e1_proxy, "fs-e1-proxy.svg", flat_square(&kimi()));
+    golden!(
+        fs_not_tracked,
+        "fs-not-tracked.svg",
+        not_tracked_flat_square("JuliusBrussee/caveman")
+    );
+
+    golden!(
+        social_measured,
+        "social-measured.svg",
+        social(&caveman(MEASURED))
+    );
+    golden!(social_e1_proxy, "social-e1-proxy.svg", social(&kimi()));
+    golden!(
+        social_not_tracked,
+        "social-not-tracked.svg",
+        not_tracked_social("JuliusBrussee/caveman")
+    );
+
+    golden!(
         ftb_measured,
         "ftb-measured.svg",
         for_the_badge(&caveman(MEASURED))
@@ -737,6 +853,9 @@ mod tests {
         assert!(svg.contains(r##" fill="#d4a72c""##), "{svg}");
         assert!(svg.contains(r#"shape-rendering="crispEdges""#), "{svg}");
         assert!(svg.contains(r#"font-weight="bold""#), "{svg}");
+        // The pill's text scheme: white label, dark value, no all-white group.
+        assert!(svg.contains(r##"fill="#24292f""##), "{svg}");
+        assert!(!svg.contains(r##"<g fill="#fff""##), "{svg}");
         // Squared corners and the 14px star in shields' logo slot.
         assert!(!svg.contains("rx="), "{svg}");
         assert!(svg.contains("translate(9,7) scale(0.875)"), "{svg}");
@@ -754,6 +873,25 @@ mod tests {
             svg.contains("afterglow: JuliusBrussee/caveman is not tracked"),
             "{svg}"
         );
+    }
+
+    /// One width arithmetic across the 20px styles: flat-square is the pill's
+    /// size exactly, and social is the pill plus its 6px gap.
+    #[test]
+    fn flat_square_and_social_share_the_pills_widths() {
+        let width = |svg: &str| {
+            let rest = &svg[svg.find("width=\"").unwrap() + 7..];
+            rest[..rest.find('"').unwrap()].parse::<f64>().unwrap()
+        };
+        let b = caveman(MEASURED);
+        assert_eq!(width(&flat_square(&b)), width(&pill(&b)));
+        assert_eq!(width(&social(&b)), width(&pill(&b)) + 6.0);
+        let fs = flat_square(&b);
+        assert!(!fs.contains("rx="), "{fs}");
+        assert!(!fs.contains("fill-opacity"), "{fs}");
+        let so = social(&b);
+        assert!(so.contains(r#"rx="2""#), "{so}");
+        assert!(so.contains("l-3 3 v1 l3 3"), "{so}");
     }
 
     #[test]

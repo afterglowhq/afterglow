@@ -104,6 +104,10 @@ pre {
 .snippet pre { padding-right: 72px; }
 .snippet code { user-select: all; }
 .snippet .copy { position: absolute; top: 6px; right: 6px; padding: 2px 10px; font-size: 0.75rem; }
+details { margin: 0 0 12px; }
+summary { cursor: pointer; color: var(--muted); font-size: 0.875rem; }
+summary:hover { color: var(--fg); }
+details[open] summary { margin-bottom: 12px; }
 .masthead {
   display: flex;
   align-items: baseline;
@@ -218,6 +222,16 @@ fn ftb_markdown(slug: &str) -> String {
     format!("[![stars]({HOST}/badge/{slug}?style=for-the-badge)]({HOST})")
 }
 
+/// The flat-square embed: the pill with its corners cut, drawn by us.
+fn flat_square_markdown(slug: &str) -> String {
+    format!("[![stars]({HOST}/badge/{slug}?style=flat-square)]({HOST})")
+}
+
+/// The social embed: the pill in GitHub's button-and-bubble shape, drawn by us.
+fn social_markdown(slug: &str) -> String {
+    format!("[![stars]({HOST}/badge/{slug}?style=social)]({HOST})")
+}
+
 /// The shields.io endpoint embed: shields' renderer fed by our numbers, the
 /// door to every other style and colour they draw.
 fn shields_markdown(slug: &str) -> String {
@@ -288,25 +302,55 @@ pub fn index(board: &Board) -> Markup {
             "Swap OWNER/REPO for your own repo's name. Tracking a repo through the form "
             "below answers with this snippet already filled in."
         }
-        p {
-            "If the rest of your badge row is in shields' " code { "for-the-badge" }
-            " style, the badge comes in that cut too, drawn here:"
-        }
-        (snippet(ftb_markdown("OWNER/REPO")))
-        @if let Some(name) = example {
-            .examples {
-                img src=(format!("/badge/{name}?style=for-the-badge"))
-                    alt=(format!("afterglow for-the-badge for {name}")) height="28";
+        // The other styles sit behind a native disclosure: one badge by
+        // default, no script, and the copy buttons inside work the same.
+        details {
+            summary {
+                "More styles: " code { "flat-square" } ", " code { "for-the-badge" }
+                ", " code { "social" }
             }
-        }
-        p.note {
-            "The words and colours stay the pill's own, amber for measured and grey for "
-            "anything weaker. Either pill is one render everywhere, the way the rest of "
-            "a badge row is."
+            p.note {
+                "Each is drawn here at its own " code { "?style=" } ". Whichever "
+                "the style, the words and colours stay the pill's own, amber for "
+                "measured and grey for anything weaker, and each is one render "
+                "everywhere, the way the rest of a badge row is."
+            }
+            p {
+                code { "flat-square" } ", corners squared for a badge row already "
+                "set that way:"
+            }
+            (snippet(flat_square_markdown("OWNER/REPO")))
+            @if let Some(name) = example {
+                .examples {
+                    img src=(format!("/badge/{name}?style=flat-square"))
+                        alt=(format!("afterglow flat-square for {name}")) height="20";
+                }
+            }
+            p {
+                code { "for-the-badge" } ", the tall one:"
+            }
+            (snippet(ftb_markdown("OWNER/REPO")))
+            @if let Some(name) = example {
+                .examples {
+                    img src=(format!("/badge/{name}?style=for-the-badge"))
+                        alt=(format!("afterglow for-the-badge for {name}")) height="28";
+                }
+            }
+            p {
+                code { "social" } ", GitHub's own button-and-bubble shape, the "
+                "count in the button and the day's velocity alone in the bubble:"
+            }
+            (snippet(social_markdown("OWNER/REPO")))
+            @if let Some(name) = example {
+                .examples {
+                    img src=(format!("/badge/{name}?style=social"))
+                        alt=(format!("afterglow social badge for {name}")) height="20";
+                }
+            }
         }
         p {
             "There is also the card, with its 30-day sparkline. It comes in a light and "
-            "a dark cut, and this block serves each reader whichever their system asks for:"
+            "a dark version, and this block serves each reader whichever their system asks for:"
         }
         (snippet(card_picture("OWNER/REPO")))
         @if let Some(name) = example {
@@ -327,8 +371,8 @@ pub fn index(board: &Board) -> Markup {
             code { "?theme=dark" } " pins it dark, for a README that is one color on purpose."
         }
         p {
-            "Any other style shields draws, plastic to flat-square to colours of your "
-            "choosing, comes through their endpoint pattern pointed at our numbers; add "
+            "Any other style shields draws, plastic to colours of your choosing, comes "
+            "through their endpoint pattern pointed at our numbers; add "
             code { "&style=" } " and " code { "&color=" } " to taste:"
         }
         (snippet(shields_markdown("OWNER/REPO")))
