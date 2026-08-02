@@ -8,10 +8,27 @@ A missed day can never be recovered, so the dataset itself is the point: measure
 
 Live at [afterglow.watch](https://afterglow.watch).
 
+## Add your badges
+
+First sight of a badge URL enrolls the repo; the badge fills in from there. Swap in your own `OWNER/REPO`.
+
+The pill:
+
+[![stars](https://afterglow.watch/badge/afterglowhq/afterglow)](https://afterglow.watch)
+
     [![stars](https://afterglow.watch/badge/OWNER/REPO)](https://afterglow.watch)
 
-First sight of that URL enrolls the repo; the badge fills in from there.
-The old star-history embed URLs also answer (`/svg?repos=owner/name`), so replacing a dead chart is a one-hostname edit.
+If your README already has a badge style, match it by appending `?style=flat-square`, `?style=for-the-badge`, or `?style=social`:
+
+[![stars](https://afterglow.watch/badge/afterglowhq/afterglow?style=flat-square)](https://afterglow.watch) [![stars](https://afterglow.watch/badge/afterglowhq/afterglow?style=for-the-badge)](https://afterglow.watch) [![stars](https://afterglow.watch/badge/afterglowhq/afterglow?style=social)](https://afterglow.watch)
+
+There is also the full chart. It answers the old star-history embed URLs (`/svg?repos=owner/name`), so replacing a dead chart is a one-hostname edit, and `?theme=dark` carries over:
+
+[![star history](https://afterglow.watch/svg?repos=afterglowhq/afterglow&type=Date)](https://afterglow.watch)
+
+    [![star history](https://afterglow.watch/svg?repos=OWNER/REPO&type=Date)](https://afterglow.watch)
+
+## The code
 
 One binary, two jobs:
 
