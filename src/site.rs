@@ -26,6 +26,11 @@ const DESCRIPTION: &str = "Daily star snapshots for GitHub repos: a README badge
 /// The form's two controls take --muted for a border where everything else takes
 /// --border. A control is an edge somebody has to find, and --border is a rule
 /// between rows: quiet enough to sit under text, too quiet to be a boundary.
+///
+/// Two golds. --gold is the fill, the one the mark and the pill are drawn in,
+/// and on the light canvas it is nowhere near AA as text. --gold-fg is the same
+/// hue carried down until it clears 4.5:1, and it is the only one that goes on
+/// words. Same reason the badge sets dark text on the amber rather than white.
 const CSS: &str = r#"
 @font-face {
   font-family: "Mona Sans";
@@ -43,6 +48,7 @@ const CSS: &str = r#"
   --accent: #0969da;
   --green: #1a7f37;
   --gold: #eac54f;
+  --gold-fg: #9a6700;
   --spark: #d4a72c;
   --body: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -57,6 +63,7 @@ const CSS: &str = r#"
     --accent: #58a6ff;
     --green: #3fb950;
     --gold: #e3b341;
+    --gold-fg: #d29922;
     --spark: #e3b341;
   }
 }
@@ -105,7 +112,7 @@ pre {
 .snippet code { user-select: all; }
 .snippet .copy { position: absolute; top: 6px; right: 6px; padding: 2px 10px; font-size: 0.75rem; }
 details { margin: 0 0 12px; }
-summary { cursor: pointer; color: var(--muted); font-size: 0.875rem; }
+summary { cursor: pointer; color: var(--gold-fg); font-size: 0.875rem; }
 summary:hover { color: var(--fg); }
 details[open] summary { margin-bottom: 12px; }
 .masthead {
