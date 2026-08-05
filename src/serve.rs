@@ -1702,11 +1702,22 @@ mod tests {
 
         // The home page shows every style live, first-party, for the top repo.
         let home = h.get("/");
-        for style in ["flat-square", "for-the-badge", "social"] {
+        for style in ["flat-square", "for-the-badge", "social", "history"] {
             assert!(
                 home.body
                     .contains(&format!(r#"src="/badge/o/r?style={style}""#)),
                 "{style} missing: {}",
+                home.body
+            );
+        }
+        // The two themed styles are offered the way a themed image has to be
+        // asked for, so the page never hands out an embed that ignores the reader.
+        for style in ["card", "history"] {
+            assert!(
+                home.body.contains(&format!(
+                    r#"srcset="/badge/o/r?style={style}&amp;theme=dark""#
+                )),
+                "{style} has no dark source: {}",
                 home.body
             );
         }
