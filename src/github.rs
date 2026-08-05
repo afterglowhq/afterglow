@@ -14,9 +14,13 @@ const USER_AGENT: &str = "afterglow";
 const MAX_ATTEMPTS: u32 = 6;
 const MAX_BACKOFF: Duration = Duration::from_secs(900);
 
-/// Aliased repos per GraphQL query. GitHub's cost formula rounds a query this
-/// size down to a single rate-limit point (verified against the live API).
-pub const GRAPHQL_BATCH: usize = 100;
+/// Aliased repos per GraphQL query. Still one rate-limit point, and now under
+/// GitHub's per-query resource limit: measured against the live API on
+/// 2026-08-05, 100 aliases took ~10s and came back with the last 14-17 nodes
+/// nulled as RESOURCE_LIMITS_EXCEEDED, while 25 took 2.7s clean. Those nulls
+/// are not NOT_FOUND, so the sweep read them as `Undecided` and silently lost
+/// the day's reading for every repo in the tail (100 of 117 due on 2026-08-04).
+pub const GRAPHQL_BATCH: usize = 25;
 
 /// `stargazers_count` carries no default on purpose: a response we cannot read a
 /// star count out of is a decode error, never a snapshot row claiming zero stars.

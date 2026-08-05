@@ -445,30 +445,35 @@ mod tests {
         assert_eq!(scalar::<i64>(&s, "SELECT COUNT(*) FROM snapshots"), 3);
     }
 
-    /// 101 due repos take two batched requests, and every one gets its row.
+    /// One repo past a full batch takes two requests, and every one gets its row.
     #[test]
     fn the_sweep_chunks_past_one_batch() {
+        let last = GRAPHQL_BATCH as i64 + 1;
         let mut s = store();
-        for i in 1i64..=101 {
+        for i in 1..=last {
             track(&s, i, &format!("o{i:03}/x"), "scan");
         }
         let node = |i: i64| graphql_node(i, &format!("o{i:03}/x"), 10 * i, "2026-01-01T00:00:00Z");
-        let first: Vec<String> = (1..=100)
+        let first: Vec<String> = (1..last)
             .map(|i| format!(r#""r{}":{}"#, i - 1, node(i)))
             .collect();
         let (base, hits) = stub(vec![
             (200, format!(r#"{{"data":{{{}}}}}"#, first.join(","))),
-            (200, format!(r#"{{"data":{{"r0":{}}}}}"#, node(101))),
+            (200, format!(r#"{{"data":{{"r0":{}}}}}"#, node(last))),
         ]);
         let now = parse_iso8601_utc(NOW).expect("a fixed now");
 
         sweep(&mut s, &GitHub::at(&base), now, NOW).unwrap();
 
         assert_eq!(hits.load(Ordering::SeqCst), 2);
-        assert_eq!(scalar::<i64>(&s, "SELECT COUNT(*) FROM snapshots"), 101);
+        assert_eq!(scalar::<i64>(&s, "SELECT COUNT(*) FROM snapshots"), last);
+        // The repo that fell into the second chunk still got its reading.
         assert_eq!(
-            scalar::<i64>(&s, "SELECT stars FROM snapshots WHERE repo_id = 101"),
-            1010
+            scalar::<i64>(
+                &s,
+                &format!("SELECT stars FROM snapshots WHERE repo_id = {last}")
+            ),
+            10 * last
         );
     }
 
