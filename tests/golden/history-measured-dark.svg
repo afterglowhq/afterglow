@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="420" height="516" role="img" aria-label="afterglow: JuliusBrussee/caveman — 94,590 stars, gaining 807 per day, top 0.4% velocity, 6 days measured">
+<title>afterglow: JuliusBrussee/caveman — 94,590 stars, gaining 807 per day, top 0.4% velocity, 6 days measured</title>
+<rect x=".5" y=".5" width="419" height="515" rx="6" fill="#0d1117" stroke="#30363d"/>
+<g font-family="Helvetica,Arial,sans-serif">
+<text x="16" y="27" font-size="13" font-weight="600" fill="#58a6ff">JuliusBrussee/caveman</text>
+<path transform="translate(16,41)" fill="#e3b341" d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/>
+<text x="38" y="56" font-size="20" font-weight="600" fill="#e6edf3">94,590</text>
+<text x="111.2" y="56" font-size="13" font-weight="600" fill="#3fb950">▲ 807/day</text>
+<text x="16" y="74" font-size="11" fill="#8b949e">top 0.4% velocity · all tracked repos</text>
+<defs><linearGradient id="glow" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#e3b341" stop-opacity=".3"/><stop offset="1" stop-color="#e3b341" stop-opacity="0"/>
+</linearGradient></defs>
+<path d="M16,466 L80.7,401.6 L145.3,336.4 L210,270.2 L274.7,203.1 L339.3,146.2 L404,86 L404,470 L16,470 Z" fill="url(#glow)"/>
+<polyline points="16,466 80.7,401.6 145.3,336.4 210,270.2 274.7,203.1 339.3,146.2 404,86" fill="none" stroke="#e3b341" stroke-width="1.5"/>
+<text x="16" y="484" font-size="10" fill="#8b949e">2026-07-30</text>
+<text x="404" y="484" font-size="10" text-anchor="end" fill="#8b949e">2026-08-05</text>
+<text x="16" y="506" font-size="10.5" font-weight="400" fill="#8b949e">6 days measured</text>
+<text x="404" y="506" font-size="10.5" text-anchor="end" fill="#8b949e">afterglow</text>
+</g>
+</svg>

@@ -39,8 +39,20 @@ pub struct RepoBadge {
     pub stars: i64,
     pub tracked_since: String,
     pub state: BadgeState,
-    /// Sparkline points in local coords of the 388x40 region; drawn only when measured.
+    /// Series points in local coords of the region the style draws in — the
+    /// card's 388x40 strip, or the history style's 388x388 square. Measured only.
     pub spark: Vec<(f64, f64)>,
+    /// The history square's x-axis: the two ends of what `spark` draws. Every
+    /// other style draws a fixed 30-day window and leaves this None.
+    pub axis: Option<Axis>,
+}
+
+/// The ends of a drawn series, and the days between them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Axis {
+    pub from: String,
+    pub to: String,
+    pub days: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -221,10 +233,39 @@ fn not_tracked_aria(name: &str) -> String {
 
 pub fn card(b: &RepoBadge, theme: Theme) -> String {
     let t = theme.palette();
+    render_frame(&card_parts(b, t, &CARD), &CARD, t)
+}
+
+/// The card grown to a square graph: everything above the series is the card's
+/// own header, so a card and a history card for the same repo cannot disagree
+/// about a number, and what the square adds is that x is real time — the slope
+/// of the line means something a fixed 30-day strip cannot show (ticket 028).
+///
+/// The series starts at the first reading and is gold end to end. There is no
+/// archive splice and no second era: the square draws what we measured.
+pub fn history(b: &RepoBadge, theme: Theme) -> String {
+    let t = theme.palette();
+    let mut parts = card_parts(b, t, &HISTORY);
+    // Anything short of a measured series keeps the card's own void and wording,
+    // drawn down the taller box.
+    if let Some(axis) = b.axis.as_ref().filter(|_| !b.spark.is_empty()) {
+        let span = span_line(axis);
+        parts.aria = format!("{}, {span}", parts.aria);
+        parts.spark = format!(
+            "{}\n{}",
+            spark_el(&b.spark, &HISTORY, t),
+            axis_el(axis, &HISTORY, t)
+        );
+        parts.footer = footer_el(&span, "400", HISTORY.footer_y, t);
+    }
+    render_frame(&parts, &HISTORY, t)
+}
+
+fn card_parts(b: &RepoBadge, t: &Palette, f: &Frame) -> CardParts {
     let repo = xml_escape(&b.full_name);
     let since = xml_escape(&b.tracked_since);
     let count = commas(b.stars);
-    let parts = match b.state {
+    match b.state {
         BadgeState::Measured {
             velocity,
             top_percent,
@@ -234,7 +275,7 @@ pub fn card(b: &RepoBadge, theme: Theme) -> String {
                 gain_phrase(velocity),
                 percent(top_percent)
             ),
-            repo: &repo,
+            repo,
             name_fill: t.accent,
             // Green is the mark of measured gain; a decline is a plain fact in
             // the foreground, neither celebrated nor dressed as degraded.
@@ -249,64 +290,79 @@ pub fn card(b: &RepoBadge, theme: Theme) -> String {
                 &format!("top {}% velocity · all tracked repos", percent(top_percent)),
                 t,
             ),
-            spark: spark_el(&b.spark, t),
-            footer: footer_el(&format!("last 30 days · tracked since {since}"), "400", t),
+            spark: spark_el(&b.spark, f, t),
+            footer: footer_el(
+                &format!("last 30 days · tracked since {since}"),
+                "400",
+                f.footer_y,
+                t,
+            ),
         },
         BadgeState::Proxy { avg } => CardParts {
             aria: format!(
                 "afterglow: {repo} — {count} stars, about {} per day lifetime average (proxy)",
                 commas(avg)
             ),
-            repo: &repo,
+            repo,
             name_fill: t.accent,
             nums: nums_row(&count, &proxy_avg(avg), t.muted, "600", t),
             pct: pct_el(MEASURING, t),
-            spark: dashed(t),
-            footer: footer_el(&format!("tracked since {since}"), "400", t),
+            spark: dashed(f, t),
+            footer: footer_el(&format!("tracked since {since}"), "400", f.footer_y, t),
         },
         BadgeState::Measuring => CardParts {
             aria: format!("afterglow: {repo} — {count} stars, measuring, first reading tomorrow"),
-            repo: &repo,
+            repo,
             name_fill: t.accent,
             nums: nums_row(&count, MEASURING, t.muted, "400", t),
             pct: String::new(),
-            spark: dashed(t),
-            footer: footer_el(&format!("tracked since {since}"), "400", t),
+            spark: dashed(f, t),
+            footer: footer_el(&format!("tracked since {since}"), "400", f.footer_y, t),
         },
         BadgeState::Enrolled => CardParts {
             aria: format!("afterglow: {repo} — tracking started {since}, history begins now"),
-            repo: &repo,
+            repo,
             name_fill: t.accent,
             nums: nums_row(&count, MEASURING, t.muted, "400", t),
             pct: String::new(),
             // No amber on day one: glow is earned.
-            spark: dashed(t),
+            spark: dashed(f, t),
             footer: footer_el(
                 &format!("tracking started {since} — history begins now"),
                 "600",
+                f.footer_y,
                 t,
             ),
         },
         BadgeState::Paused => CardParts {
             aria: format!("afterglow: {repo} — {count} stars, tracking paused"),
-            repo: &repo,
+            repo,
             name_fill: t.accent,
             nums: nums_row(&count, "tracking paused", t.muted, "400", t),
             pct: String::new(),
-            spark: dashed(t),
-            footer: footer_el(&format!("tracked since {since}"), "400", t),
+            spark: dashed(f, t),
+            footer: footer_el(&format!("tracked since {since}"), "400", f.footer_y, t),
         },
-    };
-    render_card(&parts, t)
+    }
 }
 
 pub fn not_tracked_card(full_name: &str, theme: Theme) -> String {
+    not_tracked(full_name, theme, &CARD)
+}
+
+/// A history square nobody can draw a series in is still a history square: one
+/// box size for the style, whatever state the repo is in.
+pub fn not_tracked_history(full_name: &str, theme: Theme) -> String {
+    not_tracked(full_name, theme, &HISTORY)
+}
+
+fn not_tracked(full_name: &str, theme: Theme, f: &Frame) -> String {
     let t = theme.palette();
     let repo = xml_escape(full_name);
-    render_card(
+    render_frame(
         &CardParts {
             aria: not_tracked_aria(&repo),
-            repo: &repo,
+            repo,
             // Muted, not accent: there is nothing to link to.
             name_fill: t.muted,
             nums: format!(
@@ -314,9 +370,10 @@ pub fn not_tracked_card(full_name: &str, theme: Theme) -> String {
                 t.muted
             ),
             pct: String::new(),
-            spark: dashed(t),
+            spark: dashed(f, t),
             footer: String::new(),
         },
+        f,
         t,
     )
 }
@@ -522,9 +579,9 @@ fn ftb_width(s: &str, table: &[(char, f64)]) -> f64 {
 }
 
 /// The per-state pieces of the card; the box around them is fixed in every state.
-struct CardParts<'a> {
+struct CardParts {
     aria: String,
-    repo: &'a str,
+    repo: String,
     name_fill: &'static str,
     nums: String,
     pct: String,
@@ -532,20 +589,52 @@ struct CardParts<'a> {
     footer: String,
 }
 
-fn render_card(p: &CardParts<'_>, t: &Palette) -> String {
+/// The two boxes a themed badge is drawn in. The header above the graph is the
+/// same block in both, so only the graph's height and what sits under it move.
+struct Frame {
+    /// Top of the graph box; series points are drawn in region coords from here.
+    top: f64,
+    /// The graph box's baseline: where the area fill closes, and what the
+    /// history square labels its x-axis under.
+    bottom: f64,
+    footer_y: f64,
+    height: f64,
+}
+
+const CARD: Frame = Frame {
+    top: 82.0,
+    bottom: 122.0,
+    footer_y: 140.0,
+    height: 150.0,
+};
+
+/// The card with the spark strip grown to a square: 388 is the strip's own
+/// width (x=16 to x=404), so only the height changes, 40 to 388. Everything
+/// under the graph keeps the card's spacing, plus a row for the two dates.
+const HISTORY: Frame = Frame {
+    top: 82.0,
+    bottom: 470.0,
+    footer_y: 506.0,
+    height: 516.0,
+};
+
+fn render_frame(p: &CardParts, f: &Frame, t: &Palette) -> String {
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="420" height="150" role="img" aria-label="{aria}">
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="420" height="{height}" role="img" aria-label="{aria}">
 <title>{aria}</title>
-<rect x=".5" y=".5" width="419" height="149" rx="6" fill="{canvas}" stroke="{border}"/>
+<rect x=".5" y=".5" width="419" height="{inner}" rx="6" fill="{canvas}" stroke="{border}"/>
 <g font-family="Helvetica,Arial,sans-serif">
 <text x="16" y="27" font-size="13" font-weight="600" fill="{name_fill}">{repo}</text>
 {nums}
 {pct}
 {spark}
 {footer}
-<text x="404" y="140" font-size="10.5" text-anchor="end" fill="{muted}">afterglow</text>
+<text x="404" y="{footer_y}" font-size="10.5" text-anchor="end" fill="{muted}">afterglow</text>
 </g>
 </svg>"#,
+        height = f.height,
+        inner = f.height - 1.0,
+        footer_y = f.footer_y,
         aria = p.aria,
         canvas = t.canvas,
         border = t.border,
@@ -578,23 +667,52 @@ fn pct_el(text: &str, t: &Palette) -> String {
     )
 }
 
-fn footer_el(text: &str, weight: &str, t: &Palette) -> String {
+fn footer_el(text: &str, weight: &str, y: f64, t: &Palette) -> String {
     format!(
-        r#"<text x="16" y="140" font-size="10.5" font-weight="{weight}" fill="{}">{text}</text>"#,
+        r#"<text x="16" y="{y}" font-size="10.5" font-weight="{weight}" fill="{}">{text}</text>"#,
         t.muted
     )
 }
 
-fn spark_el(points: &[(f64, f64)], t: &Palette) -> String {
+/// The x-axis of the history square: labelled where it starts and where it ends,
+/// and nowhere in between. No gridlines and no ticks, so the two dates are the
+/// whole scale, and the left one is the day the series begins rather than a caveat.
+///
+/// The dates sit 14px under the baseline and the footer another 22 under them,
+/// so the labels group with the chart they scale and the footer reads as its own line.
+fn axis_el(axis: &Axis, f: &Frame, t: &Palette) -> String {
+    let y = f.bottom + 14.0;
+    format!(
+        r#"<text x="16" y="{y}" font-size="10" fill="{muted}">{from}</text>
+<text x="404" y="{y}" font-size="10" text-anchor="end" fill="{muted}">{to}</text>"#,
+        muted = t.muted,
+        from = xml_escape(&axis.from),
+        to = xml_escape(&axis.to),
+    )
+}
+
+/// The footer under the square. The two dates are already drawn on the axis, so
+/// this says the one thing they do not: how long the series is.
+fn span_line(axis: &Axis) -> String {
+    let days = axis.days;
+    format!(
+        "{} {} measured",
+        commas(days),
+        if days == 1 { "day" } else { "days" }
+    )
+}
+
+fn spark_el(points: &[(f64, f64)], f: &Frame, t: &Palette) -> String {
     if points.is_empty() {
-        return dashed(t);
+        return dashed(f, t);
     }
+    let base = coord(f.bottom);
     let pts: Vec<String> = points
         .iter()
-        .map(|&(x, y)| format!("{},{}", coord(x + 16.0), coord(y + 82.0)))
+        .map(|&(x, y)| format!("{},{}", coord(x + 16.0), coord(y + f.top)))
         .collect();
     let area = format!(
-        "M{} L{},122 L{},122 Z",
+        "M{} L{},{base} L{},{base} Z",
         pts.join(" L"),
         coord(points[points.len() - 1].0 + 16.0),
         coord(points[0].0 + 16.0)
@@ -610,10 +728,12 @@ fn spark_el(points: &[(f64, f64)], t: &Palette) -> String {
     )
 }
 
-/// Degraded states show an honest void where the sparkline will live.
-fn dashed(t: &Palette) -> String {
+/// Degraded states show an honest void where the sparkline will live: 10px above
+/// the baseline the area fill would have closed on, in either box.
+fn dashed(f: &Frame, t: &Palette) -> String {
+    let y = coord(f.bottom - 10.0);
     format!(
-        r#"<line x1="16" y1="112" x2="404" y2="112" stroke="{}" stroke-width="1" stroke-dasharray="3,5" opacity=".6"/>"#,
+        r#"<line x1="16" y1="{y}" x2="404" y2="{y}" stroke="{}" stroke-width="1" stroke-dasharray="3,5" opacity=".6"/>"#,
         t.muted
     )
 }
@@ -734,6 +854,18 @@ mod tests {
         top_percent: 0.4,
     };
 
+    /// The same repo's whole series in the square: six days, first reading at the
+    /// bottom left, latest at the top right.
+    const LIFETIME: [(f64, f64); 7] = [
+        (0.0, 384.0),
+        (64.7, 319.6),
+        (129.3, 254.4),
+        (194.0, 188.2),
+        (258.7, 121.1),
+        (323.3, 64.2),
+        (388.0, 4.0),
+    ];
+
     fn caveman(state: BadgeState) -> RepoBadge {
         RepoBadge {
             full_name: "JuliusBrussee/caveman".to_string(),
@@ -741,6 +873,20 @@ mod tests {
             tracked_since: "2026-07-30".to_string(),
             state,
             spark: SPARK.to_vec(),
+            axis: None,
+        }
+    }
+
+    /// The measured caveman with its history drawn instead of its last 30 days.
+    fn caveman_history() -> RepoBadge {
+        RepoBadge {
+            spark: LIFETIME.to_vec(),
+            axis: Some(Axis {
+                from: "2026-07-30".to_string(),
+                to: "2026-08-05".to_string(),
+                days: 6,
+            }),
+            ..caveman(MEASURED)
         }
     }
 
@@ -751,6 +897,7 @@ mod tests {
             tracked_since: "2026-07-30".to_string(),
             state: BadgeState::Proxy { avg: 2_217 },
             spark: Vec::new(),
+            axis: None,
         }
     }
 
@@ -844,6 +991,22 @@ mod tests {
         card(&caveman(BadgeState::Enrolled), Theme::Dark)
     );
 
+    golden!(
+        history_measured_light,
+        "history-measured-light.svg",
+        history(&caveman_history(), Theme::Light)
+    );
+    golden!(
+        history_measured_dark,
+        "history-measured-dark.svg",
+        history(&caveman_history(), Theme::Dark)
+    );
+    golden!(
+        history_e1_proxy_light,
+        "history-e1-proxy-light.svg",
+        history(&kimi(), Theme::Light)
+    );
+
     #[test]
     fn for_the_badge_wears_caps_and_the_pill_colours() {
         let svg = for_the_badge(&caveman(MEASURED));
@@ -892,6 +1055,104 @@ mod tests {
         let so = social(&b);
         assert!(so.contains(r#"rx="2""#), "{so}");
         assert!(so.contains("l-3 3 v1 l3 3"), "{so}");
+    }
+
+    /// Everything a themed badge draws between the box and its series.
+    fn header_of(svg: &str) -> &str {
+        svg.split(r#"<g font-family="Helvetica,Arial,sans-serif">"#)
+            .nth(1)
+            .and_then(|rest| rest.split("<defs>").next())
+            .expect("a measured badge draws a header, then a series")
+    }
+
+    /// A card and a history card for the same repo must never disagree about a
+    /// number, so the header is the card's own block, byte for byte.
+    #[test]
+    fn the_history_square_keeps_the_cards_header() {
+        for theme in [Theme::Light, Theme::Dark] {
+            assert_eq!(
+                header_of(&history(&caveman_history(), theme)),
+                header_of(&card(&caveman(MEASURED), theme)),
+            );
+        }
+    }
+
+    #[test]
+    fn the_history_square_is_the_spark_strip_grown_to_its_own_width() {
+        let svg = history(&caveman_history(), Theme::Light);
+        assert!(svg.contains(r#"width="420" height="516""#), "{svg}");
+        assert!(svg.contains(r#"height="515" rx="6""#), "{svg}");
+        // 388 wide and 388 tall: the first reading bottom left, the latest top
+        // right, and the fill closing on the square's own baseline.
+        assert!(
+            svg.contains(r#"<polyline points="16,466 80.7,401.6"#),
+            "{svg}"
+        );
+        assert!(svg.contains(r#"339.3,146.2 404,86""#), "{svg}");
+        assert!(svg.contains(r#"L404,470 L16,470 Z""#), "{svg}");
+        // x is labelled at both ends below the baseline, and nowhere between.
+        assert!(
+            svg.contains(
+                r##"<text x="16" y="484" font-size="10" fill="#59636e">2026-07-30</text>"##
+            ),
+            "{svg}"
+        );
+        assert!(
+            svg.contains(
+                r##"<text x="404" y="484" font-size="10" text-anchor="end" fill="#59636e">2026-08-05</text>"##
+            ),
+            "{svg}"
+        );
+        // The footer says the one thing the axis does not, and the spoken line
+        // carries it too.
+        assert!(
+            svg.contains(r#"y="506" font-size="10.5" font-weight="400""#),
+            "{svg}"
+        );
+        assert!(svg.contains(">6 days measured<"), "{svg}");
+        assert!(
+            svg.contains(
+                r#"aria-label="afterglow: JuliusBrussee/caveman — 94,590 stars, gaining 807 per day, top 0.4% velocity, 6 days measured""#
+            ),
+            "{svg}"
+        );
+        assert!(!svg.contains("last 30 days"), "{svg}");
+
+        // One day of it reads as one day.
+        let svg = history(
+            &RepoBadge {
+                axis: Some(Axis {
+                    from: "2026-08-04".to_string(),
+                    to: "2026-08-05".to_string(),
+                    days: 1,
+                }),
+                ..caveman_history()
+            },
+            Theme::Light,
+        );
+        assert!(svg.contains(">1 day measured<"), "{svg}");
+    }
+
+    /// Nothing measured is still a history square: one box size for the style,
+    /// with the card's own void and wording in it.
+    #[test]
+    fn a_history_square_with_no_series_keeps_its_box() {
+        for svg in [
+            history(&kimi(), Theme::Light),
+            history(&caveman(BadgeState::Paused), Theme::Dark),
+            not_tracked_history("JuliusBrussee/caveman", Theme::Light),
+        ] {
+            assert!(svg.contains(r#"width="420" height="516""#), "{svg}");
+            assert!(svg.contains(r#"y1="460" x2="404" y2="460""#), "{svg}");
+            assert!(!svg.contains("polyline"), "{svg}");
+            assert!(!svg.contains("measured"), "{svg}");
+            assert!(svg.contains(r#"<text x="404" y="506""#), "{svg}");
+        }
+        // The card's dashed void is where it always was.
+        assert!(
+            card(&kimi(), Theme::Light).contains(r#"y1="112" x2="404" y2="112""#),
+            "the card's void moved"
+        );
     }
 
     #[test]
@@ -1020,6 +1281,7 @@ mod tests {
                     tracked_since: "2026-07-30".to_string(),
                     state: BadgeState::Measuring,
                     spark: Vec::new(),
+                    axis: None,
                 },
                 Theme::Light,
             ),
