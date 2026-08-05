@@ -608,14 +608,16 @@ const CARD: Frame = Frame {
     height: 150.0,
 };
 
-/// The card with the spark strip grown to a square: 388 is the strip's own
-/// width (x=16 to x=404), so only the height changes, 40 to 388. Everything
-/// under the graph keeps the card's spacing, plus a row for the two dates.
+/// The card grown until the card itself is the square: 420 x 420, which puts
+/// the graph at 388 x 292 once the header and the two rows under the baseline
+/// take their 128. A 388-tall graph would have been square and invisible,
+/// since nothing draws its edges and the only rectangle a reader sees is this
+/// box. Everything under the graph keeps the card's spacing, plus the dates.
 const HISTORY: Frame = Frame {
     top: 82.0,
-    bottom: 470.0,
-    footer_y: 506.0,
-    height: 516.0,
+    bottom: 374.0,
+    footer_y: 410.0,
+    height: 420.0,
 };
 
 fn render_frame(p: &CardParts, f: &Frame, t: &Palette) -> String {
@@ -857,12 +859,12 @@ mod tests {
     /// The same repo's whole series in the square: six days, first reading at the
     /// bottom left, latest at the top right.
     const LIFETIME: [(f64, f64); 7] = [
-        (0.0, 384.0),
-        (64.7, 319.6),
-        (129.3, 254.4),
-        (194.0, 188.2),
-        (258.7, 121.1),
-        (323.3, 64.2),
+        (0.0, 288.0),
+        (64.7, 239.9),
+        (129.3, 191.1),
+        (194.0, 141.7),
+        (258.7, 91.5),
+        (323.3, 49.0),
         (388.0, 4.0),
     ];
 
@@ -1080,33 +1082,33 @@ mod tests {
     #[test]
     fn the_history_square_is_the_spark_strip_grown_to_its_own_width() {
         let svg = history(&caveman_history(), Theme::Light);
-        assert!(svg.contains(r#"width="420" height="516""#), "{svg}");
-        assert!(svg.contains(r#"height="515" rx="6""#), "{svg}");
+        assert!(svg.contains(r#"width="420" height="420""#), "{svg}");
+        assert!(svg.contains(r#"height="419" rx="6""#), "{svg}");
         // 388 wide and 388 tall: the first reading bottom left, the latest top
         // right, and the fill closing on the square's own baseline.
         assert!(
-            svg.contains(r#"<polyline points="16,466 80.7,401.6"#),
+            svg.contains(r#"<polyline points="16,370 80.7,321.9"#),
             "{svg}"
         );
-        assert!(svg.contains(r#"339.3,146.2 404,86""#), "{svg}");
-        assert!(svg.contains(r#"L404,470 L16,470 Z""#), "{svg}");
+        assert!(svg.contains(r#"339.3,131 404,86""#), "{svg}");
+        assert!(svg.contains(r#"L404,374 L16,374 Z""#), "{svg}");
         // x is labelled at both ends below the baseline, and nowhere between.
         assert!(
             svg.contains(
-                r##"<text x="16" y="484" font-size="10" fill="#59636e">2026-07-30</text>"##
+                r##"<text x="16" y="388" font-size="10" fill="#59636e">2026-07-30</text>"##
             ),
             "{svg}"
         );
         assert!(
             svg.contains(
-                r##"<text x="404" y="484" font-size="10" text-anchor="end" fill="#59636e">2026-08-05</text>"##
+                r##"<text x="404" y="388" font-size="10" text-anchor="end" fill="#59636e">2026-08-05</text>"##
             ),
             "{svg}"
         );
         // The footer says the one thing the axis does not, and the spoken line
         // carries it too.
         assert!(
-            svg.contains(r#"y="506" font-size="10.5" font-weight="400""#),
+            svg.contains(r#"y="410" font-size="10.5" font-weight="400""#),
             "{svg}"
         );
         assert!(svg.contains(">6 days measured<"), "{svg}");
@@ -1142,11 +1144,11 @@ mod tests {
             history(&caveman(BadgeState::Paused), Theme::Dark),
             not_tracked_history("JuliusBrussee/caveman", Theme::Light),
         ] {
-            assert!(svg.contains(r#"width="420" height="516""#), "{svg}");
-            assert!(svg.contains(r#"y1="460" x2="404" y2="460""#), "{svg}");
+            assert!(svg.contains(r#"width="420" height="420""#), "{svg}");
+            assert!(svg.contains(r#"y1="364" x2="404" y2="364""#), "{svg}");
             assert!(!svg.contains("polyline"), "{svg}");
             assert!(!svg.contains("measured"), "{svg}");
-            assert!(svg.contains(r#"<text x="404" y="506""#), "{svg}");
+            assert!(svg.contains(r#"<text x="404" y="410""#), "{svg}");
         }
         // The card's dashed void is where it always was.
         assert!(
