@@ -22,20 +22,36 @@ If your README already has a badge style, match it by appending `?style=flat-squ
 
 [![stars](https://afterglow.watch/badge/afterglowhq/afterglow?style=flat-square)](https://afterglow.watch) [![stars](https://afterglow.watch/badge/afterglowhq/afterglow?style=for-the-badge)](https://afterglow.watch) [![stars](https://afterglow.watch/badge/afterglowhq/afterglow?style=social)](https://afterglow.watch)
 
-There is also the full chart. It answers the old star-history embed URLs (`/svg?repos=owner/name`), so replacing a dead chart is a one-hostname edit, and `?theme=dark` carries over:
+There is also the full chart. It answers the old star-history embed URLs (`/svg?repos=owner/name`), so replacing a dead chart is a one-hostname edit:
 
-[![star history](https://afterglow.watch/svg?repos=afterglowhq/afterglow&type=Date)](https://afterglow.watch)
+<a href="https://afterglow.watch"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://afterglow.watch/svg?repos=afterglowhq/afterglow&type=Date&theme=dark">
+  <img alt="star history" src="https://afterglow.watch/svg?repos=afterglowhq/afterglow&type=Date" width="420" height="150">
+</picture></a>
 
-    [![star history](https://afterglow.watch/svg?repos=OWNER/REPO&type=Date)](https://afterglow.watch)
+    <a href="https://afterglow.watch"><picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://afterglow.watch/svg?repos=OWNER/REPO&type=Date&theme=dark">
+      <img alt="star history" src="https://afterglow.watch/svg?repos=OWNER/REPO&type=Date" width="420" height="150">
+    </picture></a>
 
-That chart is a 30-day window. If you want the whole series instead, `?style=history` draws it as a square:
+The chart is themed, so it takes `<picture>` rather than a markdown image. An image tag carries one URL and cannot see which theme you are reading in, so the two-source block is what serves a dark reader the dark cut. A bare URL stays light and `&theme=dark` pins it dark, for a README that is one colour on purpose.
 
-[![star history](https://afterglow.watch/badge/afterglowhq/afterglow?style=history)](https://afterglow.watch)
+That chart is a 30-day window. For the whole series, `?style=history` draws it as a square:
 
-    [![star history](https://afterglow.watch/badge/OWNER/REPO?style=history)](https://afterglow.watch)
+<a href="https://afterglow.watch"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://afterglow.watch/badge/afterglowhq/afterglow?style=history&theme=dark">
+  <img alt="star history" src="https://afterglow.watch/badge/afterglowhq/afterglow?style=history" width="420" height="420">
+</picture></a>
+
+    <a href="https://afterglow.watch"><picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://afterglow.watch/badge/OWNER/REPO?style=history&theme=dark">
+      <img alt="star history" src="https://afterglow.watch/badge/OWNER/REPO?style=history" width="420" height="420">
+    </picture></a>
 
 It starts at the day we first read your repo, which is the earliest point anyone still has.
 The numbers across the top are the card's, so the two never disagree.
+
+The pill and its cuts above are theme-invariant on purpose, so they stay plain markdown.
 
 ## The code
 
