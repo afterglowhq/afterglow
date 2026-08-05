@@ -59,13 +59,14 @@ const CARD_SPARK: Region = Region {
     bottom: 36.0,
     flat: 20.0,
 };
-/// The history square: the card's spark region at its own width, so the graph is
-/// 388 x 388 and the drawing code does not fork (ticket 028).
+/// The history square's graph, 388 x 292: the card's spark region at its own
+/// width and as tall as a 420 x 420 box leaves it (ticket 028). Same shape as
+/// CARD_SPARK, so the drawing code does not fork.
 const CARD_HISTORY: Region = Region {
     width: 388.0,
     top: 4.0,
-    bottom: 384.0,
-    flat: 194.0,
+    bottom: 288.0,
+    flat: 146.0,
 };
 pub const MINI_SPARK: Region = Region {
     width: 100.0,
@@ -1751,14 +1752,14 @@ mod tests {
         assert_eq!(got.content_type, "image/svg+xml; charset=utf-8");
         assert_eq!(got.cache_control, "public, max-age=3600");
         assert!(
-            got.body.contains(r#"width="420" height="516""#),
+            got.body.contains(r#"width="420" height="420""#),
             "{}",
             got.body
         );
         // x runs first reading to last, so the line spans the square corner to
         // corner, and the two ends are labelled with the dates they are.
         assert!(
-            got.body.contains(r#"<polyline points="16,466"#),
+            got.body.contains(r#"<polyline points="16,370"#),
             "{}",
             got.body
         );
@@ -1797,7 +1798,7 @@ mod tests {
         );
         let none = h.get("/badge/ghost/ship?style=history");
         assert!(
-            none.body.contains(r#"width="420" height="516""#),
+            none.body.contains(r#"width="420" height="420""#),
             "{}",
             none.body
         );
@@ -1812,7 +1813,7 @@ mod tests {
         h.snapshot_at(2, &format!("{day}T23:50:00Z"), 700);
         let thin = h.get("/badge/o/oneday?style=history");
         assert!(
-            thin.body.contains(r#"width="420" height="516""#),
+            thin.body.contains(r#"width="420" height="420""#),
             "{}",
             thin.body
         );
