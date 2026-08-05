@@ -224,6 +224,16 @@ fn card_picture(slug: &str) -> String {
     )
 }
 
+/// The history embed: the card's theme-aware block at the square's own size.
+fn history_picture(slug: &str) -> String {
+    format!(
+        "<a href=\"{HOST}\"><picture>\n  \
+         <source media=\"(prefers-color-scheme: dark)\" srcset=\"{HOST}/badge/{slug}?style=history&theme=dark\">\n  \
+         <img alt=\"star history\" src=\"{HOST}/badge/{slug}?style=history\" width=\"420\" height=\"420\">\n\
+         </picture></a>"
+    )
+}
+
 /// The for-the-badge embed, drawn by us at our own URL.
 fn ftb_markdown(slug: &str) -> String {
     format!("[![stars]({HOST}/badge/{slug}?style=for-the-badge)]({HOST})")
@@ -376,6 +386,33 @@ pub fn index(board: &Board) -> Markup {
             "That is GitHub's own pattern for theme-aware images, and it is the default way "
             "to embed the card. A bare " code { "?style=card" } " URL stays light, and "
             code { "?theme=dark" } " pins it dark, for a README that is one color on purpose."
+        }
+        // The square behind the same disclosure the other styles use: it is a
+        // 420px render, and a page that opens with one of them buried the card.
+        details {
+            summary { "The whole history, not just the last 30 days" }
+            p {
+                code { "?style=history" } " keeps that header and grows the sparkline into "
+                "a square: every reading since we first saw the repo, left to right in real "
+                "time, so the slope of the line is the speed it gained them."
+            }
+            (snippet(history_picture("OWNER/REPO")))
+            @if let Some(name) = example {
+                .examples {
+                    picture {
+                        source media="(prefers-color-scheme: dark)"
+                            srcset=(format!("/badge/{name}?style=history&theme=dark"));
+                        img src=(format!("/badge/{name}?style=history"))
+                            alt=(format!("afterglow history square for {name}"))
+                            width="420" height="420";
+                    }
+                }
+            }
+            p.note {
+                "It starts the day tracking started, not the day the repo did. Nothing "
+                "before that was ours to measure, and the two dates under the chart say "
+                "which days it covers."
+            }
         }
         p {
             "Any other style shields draws, plastic to colours of your choosing, comes "
