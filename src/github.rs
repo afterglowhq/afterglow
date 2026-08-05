@@ -14,12 +14,10 @@ const USER_AGENT: &str = "afterglow";
 const MAX_ATTEMPTS: u32 = 6;
 const MAX_BACKOFF: Duration = Duration::from_secs(900);
 
-/// Aliased repos per GraphQL query. Still one rate-limit point, and now under
-/// GitHub's per-query resource limit: measured against the live API on
-/// 2026-08-05, 100 aliases took ~10s and came back with the last 14-17 nodes
-/// nulled as RESOURCE_LIMITS_EXCEEDED, while 25 took 2.7s clean. Those nulls
-/// are not NOT_FOUND, so the sweep read them as `Undecided` and silently lost
-/// the day's reading for every repo in the tail (100 of 117 due on 2026-08-04).
+/// Aliased repos per GraphQL query. One rate-limit point whatever the size, so
+/// what sets it is GitHub's per-query resource limit: measured against the live
+/// API on 2026-08-05, 100 aliases took ~10s and came back with the last 14-17
+/// nodes nulled, while 25 took 2.7s clean.
 pub const GRAPHQL_BATCH: usize = 25;
 
 /// `stargazers_count` carries no default on purpose: a response we cannot read a
@@ -64,14 +62,17 @@ struct SearchPage {
 }
 
 /// One repo's verdict out of a batched probe. `Gone` is a definite NOT_FOUND
-/// and nothing else: any other per-repo error (a DMCA block, a transient
-/// resolver failure) stays `Undecided`, because retiring a series needs a
-/// definite answer.
+/// and nothing else, because retiring a series needs a definite answer.
+/// `Blocked` is the other definite refusal (a DMCA takedown, an org we cannot
+/// see into), a standing condition of the repo rather than a run that went
+/// wrong. Everything else is `Failed`, carrying GitHub's error type: that repo
+/// has no reading today, and a missed day cannot be backfilled (ADR-002).
 #[derive(Debug)]
 pub enum Probe {
     Found(Repo),
     Gone,
-    Undecided,
+    Blocked,
+    Failed(String),
 }
 
 pub struct GitHub {
@@ -195,12 +196,16 @@ impl GitHub {
                 let alias = format!("r{i}");
                 let node = &data[alias.as_str()];
                 if !node.is_null() {
-                    Ok(Probe::Found(repo_from_node(node)?))
-                } else if verdicts.get(alias.as_str()) == Some(&"NOT_FOUND") {
-                    Ok(Probe::Gone)
-                } else {
-                    Ok(Probe::Undecided)
+                    return Ok(Probe::Found(repo_from_node(node)?));
                 }
+                Ok(match verdicts.get(alias.as_str()).copied() {
+                    Some("NOT_FOUND") => Probe::Gone,
+                    Some("FORBIDDEN") => Probe::Blocked,
+                    // Those two are answers about the repo. Anything else,
+                    // including a type we have never seen, is the request
+                    // going wrong, and the caller is told which.
+                    other => Probe::Failed(other.unwrap_or("no error given").to_string()),
+                })
             })
             .collect()
     }
@@ -449,13 +454,13 @@ mod tests {
     #[test]
     fn a_batch_probe_sorts_found_gone_and_blocked() {
         let body = format!(
-            r#"{{"data":{{"r0":{},"r1":null,"r2":null}},"errors":[{{"type":"NOT_FOUND","path":["r1"],"message":"gone"}},{{"type":"FORBIDDEN","path":["r2"],"message":"dmca"}}]}}"#,
+            r#"{{"data":{{"r0":{},"r1":null,"r2":null,"r3":null}},"errors":[{{"type":"NOT_FOUND","path":["r1"],"message":"gone"}},{{"type":"FORBIDDEN","path":["r2"],"message":"dmca"}},{{"type":"RESOURCE_LIMITS_EXCEEDED","path":["r3"],"message":"too much"}}]}}"#,
             graphql_node(9, "a/renamed", 12, "2026-01-02T03:04:05Z")
         );
         let (base, hits) = stub(vec![(200, body)]);
         let gh = GitHub::at(&base);
 
-        let probes = gh.repos_batch(&["a/b", "c/d", "e/f"]).unwrap();
+        let probes = gh.repos_batch(&["a/b", "c/d", "e/f", "g/h"]).unwrap();
 
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         let Probe::Found(repo) = &probes[0] else {
@@ -470,7 +475,13 @@ mod tests {
         assert_eq!(repo.language.as_deref(), Some("Rust"));
         assert!(matches!(probes[1], Probe::Gone));
         // Blocked is not gone: no verdict, never a retirement.
-        assert!(matches!(probes[2], Probe::Undecided));
+        assert!(matches!(probes[2], Probe::Blocked));
+        // The nulled tail of an oversized query is neither of those. It is the
+        // run failing on that repo, and it says so.
+        let Probe::Failed(why) = &probes[3] else {
+            panic!("expected Failed, got {:?}", probes[3]);
+        };
+        assert_eq!(why, "RESOURCE_LIMITS_EXCEEDED");
     }
 
     #[test]

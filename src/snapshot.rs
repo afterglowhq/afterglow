@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use rusqlite::params;
 
 use crate::github::{GRAPHQL_BATCH, GitHub, Probe, SearchItem};
@@ -139,9 +139,16 @@ fn drain_queue(store: &mut Store, gh: &GitHub, ts: &str) -> Result<()> {
 /// repos, plus scan repos that aged out of the search window. No series ends
 /// silently (ADR-002).
 ///
-/// Batched GraphQL: ~100 repos a query for one rate-limit point of 5,000 an
+/// Batched GraphQL: a whole batch a query for one rate-limit point of 5,000 an
 /// hour, so the whole pass stays a handful of points a day well past any
 /// population the enrollment budgets can reach.
+///
+/// A due repo that ends the pass without a reading fails the run, because the
+/// unit's `OnFailure=afterglow-alert@` hook is the only way out of this process
+/// that anyone reads. No tolerance fraction: a standing block already sorts
+/// itself out as `Probe::Blocked` and costs nothing, so whatever is left is a
+/// run that went wrong, and one repo's missed day is as unrecoverable as a
+/// hundred (ADR-002).
 fn sweep(store: &mut Store, gh: &GitHub, now: i64, ts: &str) -> Result<()> {
     let cutoff = iso8601_utc(now - STALE_AFTER_HOURS * 3600);
     let stale: Vec<(i64, String, String)> = {
@@ -151,12 +158,13 @@ fn sweep(store: &mut Store, gh: &GitHub, now: i64, ts: &str) -> Result<()> {
         })?;
         rows.collect::<rusqlite::Result<_>>()?
     };
-    let (mut swept, mut inactive) = (0usize, 0usize);
+    let (mut swept, mut inactive, mut blocked) = (0usize, 0usize, 0usize);
     for chunk in stale.chunks(GRAPHQL_BATCH) {
         let names: Vec<&str> = chunk.iter().map(|(_, name, _)| name.as_str()).collect();
         let probes = match gh.repos_batch(&names) {
             Ok(probes) => probes,
-            // The unswept stay stale and are due again tomorrow (ADR-002).
+            // The unswept stay stale and are due again tomorrow (ADR-002), but
+            // this batch and every one behind it lost today, so the run fails.
             Err(e) => {
                 eprintln!("sweep stopped at the batch holding {}: {e:#}", names[0]);
                 break;
@@ -173,16 +181,30 @@ fn sweep(store: &mut Store, gh: &GitHub, now: i64, ts: &str) -> Result<()> {
                     store.conn.execute(MARK_INACTIVE, params![id])?;
                     inactive += 1;
                 }
-                Probe::Undecided => eprintln!("sweep: no verdict on {full_name}, kept as due"),
+                Probe::Blocked => {
+                    blocked += 1;
+                    eprintln!("sweep: {full_name} is blocked, kept as due");
+                }
+                Probe::Failed(why) => eprintln!("sweep: no reading for {full_name} ({why})"),
             }
         }
     }
+    // Whatever a due repo did not become is a reading this pass lost: a failed
+    // probe, or a batch the break above never reached.
+    let unread = stale.len() - swept - inactive - blocked;
     println!(
-        "sweep: {} refreshed, {} now inactive, {} due",
+        "sweep: {} refreshed, {} now inactive, {} blocked, {} due",
         plural(swept, "repo"),
         plural(inactive, "repo"),
+        blocked,
         stale.len()
     );
+    if unread > 0 {
+        bail!(
+            "sweep left {unread} of {} due repos unread; those days cannot be backfilled",
+            stale.len()
+        );
+    }
     Ok(())
 }
 
@@ -478,7 +500,9 @@ mod tests {
     }
 
     /// A DMCA block answers without deciding anything: the repo is neither
-    /// refreshed nor retired, and comes up due again tomorrow.
+    /// refreshed nor retired, and comes up due again tomorrow. The unwrap is the
+    /// point. A block is a standing condition of the repo, so it must not page
+    /// anyone every morning for as long as the repo is tracked.
     #[test]
     fn a_blocked_repo_is_neither_refreshed_nor_retired() {
         let mut s = store();
@@ -494,5 +518,49 @@ mod tests {
             "active"
         );
         assert_eq!(scalar::<i64>(&s, "SELECT COUNT(*) FROM snapshots"), 0);
+    }
+
+    /// A nulled tail with a resource limit on it. Those readings are gone
+    /// whatever we do next, so the run exits non-zero and the alert hook fires.
+    #[test]
+    fn a_repo_left_unread_fails_the_run() {
+        let mut s = store();
+        track(&s, 1, "a/answered", "scan");
+        track(&s, 2, "b/nulled", "embed");
+        let body = format!(
+            r#"{{"data":{{"r0":{},"r1":null}},"errors":[{{"type":"RESOURCE_LIMITS_EXCEEDED","path":["r1"],"message":"too much"}}]}}"#,
+            graphql_node(1, "a/answered", 140, "2026-01-01T00:00:00Z")
+        );
+        let (base, _) = stub(vec![(200, body)]);
+        let now = parse_iso8601_utc(NOW).expect("a fixed now");
+
+        let err = sweep(&mut s, &GitHub::at(&base), now, NOW).unwrap_err();
+
+        assert!(err.to_string().contains("1 of 2"), "{err}");
+        // Failing is a signal, not a rollback: the repo that answered keeps its
+        // row, and the one that did not is still active and still due.
+        assert_eq!(
+            scalar::<i64>(&s, "SELECT COUNT(*) FROM snapshots WHERE repo_id = 1"),
+            1
+        );
+        assert_eq!(
+            scalar::<String>(&s, "SELECT status FROM repos WHERE id = 2"),
+            "active"
+        );
+    }
+
+    /// A batch that never answered is the same lost day as one that answered
+    /// with nulls, so breaking out of the sweep fails the run too.
+    #[test]
+    fn a_batch_the_sweep_never_reached_fails_the_run() {
+        let mut s = store();
+        track(&s, 1, "a/one", "scan");
+        track(&s, 2, "b/two", "scan");
+        let (base, _) = stub(vec![]);
+        let now = parse_iso8601_utc(NOW).expect("a fixed now");
+
+        let err = sweep(&mut s, &GitHub::at(&base), now, NOW).unwrap_err();
+
+        assert!(err.to_string().contains("2 of 2"), "{err}");
     }
 }
