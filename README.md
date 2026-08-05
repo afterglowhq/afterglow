@@ -28,6 +28,15 @@ There is also the full chart. It answers the old star-history embed URLs (`/svg?
 
     [![star history](https://afterglow.watch/svg?repos=OWNER/REPO&type=Date)](https://afterglow.watch)
 
+That chart is a 30-day window. If you want the whole series instead, `?style=history` draws it as a square:
+
+[![star history](https://afterglow.watch/badge/afterglowhq/afterglow?style=history)](https://afterglow.watch)
+
+    [![star history](https://afterglow.watch/badge/OWNER/REPO?style=history)](https://afterglow.watch)
+
+It starts at the day we first read your repo, which is the earliest point anyone still has.
+The numbers across the top are the card's, so the two never disagree.
+
 ## The code
 
 One binary, two jobs:

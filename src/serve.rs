@@ -59,6 +59,14 @@ const CARD_SPARK: Region = Region {
     bottom: 36.0,
     flat: 20.0,
 };
+/// The history square: the card's spark region at its own width, so the graph is
+/// 388 x 388 and the drawing code does not fork (ticket 028).
+const CARD_HISTORY: Region = Region {
+    width: 388.0,
+    top: 4.0,
+    bottom: 384.0,
+    flat: 194.0,
+};
 pub const MINI_SPARK: Region = Region {
     width: 100.0,
     top: 4.0,
@@ -152,6 +160,10 @@ SELECT ts, stars FROM snapshots WHERE repo_id = ?1 AND ts <= ?2 ORDER BY ts DESC
 
 const SNAPSHOTS_SINCE: &str = "\
 SELECT ts, stars FROM snapshots WHERE repo_id = ?1 AND ts >= ?2 ORDER BY ts";
+
+/// Everything measured about one repo, for the history square. One row a day,
+/// so this is the tracked-days count; page it if a series ever outgrows a screen.
+const ALL_SNAPSHOTS: &str = "SELECT ts, stars FROM snapshots WHERE repo_id = ?1 ORDER BY ts";
 
 /// The fleet's recent readings in one pass. `status = 'active'` is what keeps an
 /// opted-out repo out of both the percentile pool and the leaderboard.
@@ -352,6 +364,24 @@ enum Shape {
     ForTheBadge,
     Social,
     Card(Theme),
+    History(Theme),
+}
+
+/// How much of a repo's series a badge draws: the card's fixed 30 days, or
+/// everything measured since the first reading (the history square).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Window {
+    Recent,
+    Lifetime,
+}
+
+impl Shape {
+    fn window(self) -> Window {
+        match self {
+            Shape::History(_) => Window::Lifetime,
+            _ => Window::Recent,
+        }
+    }
 }
 
 /// Velocity is what the page claims, so it stays the default order. Stars is the
@@ -499,6 +529,7 @@ async fn canonical_badge(
     // An unreadable style falls back to the pill: this URL never gets to error.
     let shape = match q.get("style").map(String::as_str) {
         Some("card") => Shape::Card(theme_of(&q)),
+        Some("history") => Shape::History(theme_of(&q)),
         Some("flat-square") => Shape::FlatSquare,
         Some("for-the-badge") => Shape::ForTheBadge,
         Some("social") => Shape::Social,
@@ -535,7 +566,8 @@ async fn shields_endpoint(
     let name = format!("{owner}/{repo}");
     let resolved = {
         let (state, name) = (Arc::clone(&state), name.clone());
-        tokio::task::spawn_blocking(move || resolve(&state, &name, now_unix())).await
+        tokio::task::spawn_blocking(move || resolve(&state, &name, now_unix(), Window::Recent))
+            .await
     };
     let badge = resolved.unwrap_or_else(|e| {
         eprintln!("badge {name}: {e}");
@@ -582,7 +614,8 @@ async fn render(state: Arc<AppState>, full_name: &str, shape: Shape) -> Response
     let name = full_name.to_string();
     let resolved = {
         let (state, name) = (Arc::clone(&state), name.clone());
-        tokio::task::spawn_blocking(move || resolve(&state, &name, now_unix())).await
+        let window = shape.window();
+        tokio::task::spawn_blocking(move || resolve(&state, &name, now_unix(), window)).await
     };
     let badge = resolved.unwrap_or_else(|e| {
         // A panicking handler is a bug to fix, never a broken image in a README.
@@ -598,11 +631,13 @@ async fn render(state: Arc<AppState>, full_name: &str, shape: Shape) -> Response
         (Some(b), Shape::ForTheBadge) => (badge::for_the_badge(b), max_age_for(b.state)),
         (Some(b), Shape::Social) => (badge::social(b), max_age_for(b.state)),
         (Some(b), Shape::Card(theme)) => (badge::card(b, theme), max_age_for(b.state)),
+        (Some(b), Shape::History(theme)) => (badge::history(b, theme), max_age_for(b.state)),
         (None, Shape::Pill) => (badge::not_tracked_pill(&shown), FRESH_MAX_AGE),
         (None, Shape::FlatSquare) => (badge::not_tracked_flat_square(&shown), FRESH_MAX_AGE),
         (None, Shape::ForTheBadge) => (badge::not_tracked_for_the_badge(&shown), FRESH_MAX_AGE),
         (None, Shape::Social) => (badge::not_tracked_social(&shown), FRESH_MAX_AGE),
         (None, Shape::Card(theme)) => (badge::not_tracked_card(&shown, theme), FRESH_MAX_AGE),
+        (None, Shape::History(theme)) => (badge::not_tracked_history(&shown, theme), FRESH_MAX_AGE),
     };
     svg_response(svg, max_age)
 }
@@ -737,7 +772,7 @@ struct Reading {
 }
 
 /// The badge for a repo, or `None` for anything untracked we could not enroll.
-fn resolve(state: &AppState, full_name: &str, now: i64) -> Option<RepoBadge> {
+fn resolve(state: &AppState, full_name: &str, now: i64, window: Window) -> Option<RepoBadge> {
     let (owner, name) = full_name.split_once('/')?;
     if !valid_owner(owner) || !valid_name(name) {
         // Junk reaches neither GitHub nor the store.
@@ -754,7 +789,7 @@ fn resolve(state: &AppState, full_name: &str, now: i64) -> Option<RepoBadge> {
         Some(repo) if repo.status == Status::OptedOut => None,
         Some(repo) => {
             let store = state.store();
-            logged(full_name, build(&store.conn, &repo, now))?
+            logged(full_name, build(&store.conn, &repo, now, window))?
         }
         None => match enroll(state, Lane::Embed, full_name, now) {
             Enrollment::Started(badge) => Some(badge),
@@ -793,7 +828,7 @@ fn find_repo(conn: &Connection, full_name: &str) -> Result<Option<Tracked>> {
         .optional()?)
 }
 
-fn build(conn: &Connection, repo: &Tracked, now: i64) -> Result<Option<RepoBadge>> {
+fn build(conn: &Connection, repo: &Tracked, now: i64, window: Window) -> Result<Option<RepoBadge>> {
     let latest = read_one(conn, LATEST_SNAPSHOT, params![repo.id])?;
     let stars = latest.as_ref().map_or(0, |r| r.stars);
     let measured = match &latest {
@@ -814,9 +849,14 @@ fn build(conn: &Connection, repo: &Tracked, now: i64) -> Result<Option<RepoBadge
     } else {
         BadgeState::Measuring
     };
-    let spark = match state {
-        BadgeState::Measured { .. } => spark(conn, repo.id, now)?,
-        _ => Vec::new(),
+    // Glow is earned in either window: nothing but a measured repo draws a series.
+    let (spark, axis) = match (state, window) {
+        (BadgeState::Measured { .. }, Window::Recent) => (spark(conn, repo.id, now)?, None),
+        (BadgeState::Measured { .. }, Window::Lifetime) => match history(conn, repo.id)? {
+            Some((points, axis)) => (points, Some(axis)),
+            None => (Vec::new(), None),
+        },
+        _ => (Vec::new(), None),
     };
     Ok(Some(RepoBadge {
         full_name: repo.full_name.clone(),
@@ -824,6 +864,7 @@ fn build(conn: &Connection, repo: &Tracked, now: i64) -> Result<Option<RepoBadge
         tracked_since: repo.enrolled_at.get(..10).unwrap_or_default().to_string(),
         state,
         spark,
+        axis,
     }))
 }
 
@@ -956,7 +997,46 @@ fn spark(conn: &Connection, repo_id: i64, now: i64) -> Result<Vec<(f64, f64)>> {
         })
     })?;
     let readings: Vec<Reading> = rows.collect::<rusqlite::Result<_>>()?;
-    Ok(spark_points(&readings, now, &CARD_SPARK, None))
+    Ok(spark_points(&readings, start, now, &CARD_SPARK, None))
+}
+
+/// A drawn series and the two dates that scale it.
+type Square = (Vec<(f64, f64)>, badge::Axis);
+
+/// Everything measured, drawn in the square, with the two ends of it named.
+///
+/// The x-axis runs first reading to last rather than to now, so the line touches
+/// both edges and the dates under them are the dates of real readings.
+fn history(conn: &Connection, repo_id: i64) -> Result<Option<Square>> {
+    let mut stmt = conn.prepare(ALL_SNAPSHOTS)?;
+    let readings: Vec<Reading> = stmt
+        .query_map(params![repo_id], |row| {
+            Ok(Reading {
+                ts: row.get(0)?,
+                stars: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let (Some(first), Some(last)) = (readings.first(), readings.last()) else {
+        return Ok(None);
+    };
+    let (Some(start), Some(end)) = (parse_iso8601_utc(&first.ts), parse_iso8601_utc(&last.ts))
+    else {
+        return Ok(None);
+    };
+    let points = spark_points(&readings, start, end, &CARD_HISTORY, None);
+    if points.is_empty() {
+        // One day measured is not a chart; the square shows the honest void.
+        return Ok(None);
+    }
+    Ok(Some((
+        points,
+        badge::Axis {
+            from: date_utc(start),
+            to: date_utc(end),
+            days: ((end - start) as f64 / SECONDS_PER_DAY as f64).round() as i64,
+        },
+    )))
 }
 
 /// One point a day inside the window: the last reading of each UTC day.
@@ -990,8 +1070,10 @@ fn spark_range(readings: &[Reading], now: i64) -> i64 {
     max - min
 }
 
-/// The last 30 days of a series as points in a region. x is real time, so a young
-/// series occupies only the right and the empty left is the whole point.
+/// A window of a series as points in a region. x is real time, so a young series
+/// in the card's fixed 30 days occupies only the right and the empty left is the
+/// whole point; the history square instead ends its window at the last reading,
+/// so the line spans it.
 ///
 /// `shared_range` is the largest 30-day movement on the board this series sits
 /// on: every row is drawn in that row's stars-per-pixel, so a steeper line is a
@@ -1000,13 +1082,13 @@ fn spark_range(readings: &[Reading], now: i64) -> i64 {
 /// comparable with and its magnitude is printed beside it.
 fn spark_points(
     readings: &[Reading],
-    now: i64,
+    start: i64,
+    end: i64,
     region: &Region,
     shared_range: Option<i64>,
 ) -> Vec<(f64, f64)> {
-    let start = now - SPARK_DAYS * SECONDS_PER_DAY;
     let daily = daily_points(readings, start);
-    if daily.len() < 2 {
+    if daily.len() < 2 || end <= start {
         return Vec::new();
     }
 
@@ -1025,7 +1107,7 @@ fn spark_points(
         }
         _ => height,
     };
-    let span = (now - start) as f64;
+    let span = (end - start) as f64;
     daily
         .iter()
         .map(|&(at, stars)| {
@@ -1135,7 +1217,13 @@ fn board(conn: &Connection, now: i64) -> Result<Board> {
                     per_day,
                     top_percent: percentile_of(&fleet, per_day),
                 },
-                spark_points(&s.readings, now, &MINI_SPARK, shared_range),
+                spark_points(
+                    &s.readings,
+                    now - SPARK_DAYS * SECONDS_PER_DAY,
+                    now,
+                    &MINI_SPARK,
+                    shared_range,
+                ),
             ),
             // Nothing measured: a young repo still has an honest average, and an
             // old one has no number at all, so it has no row.
@@ -1217,6 +1305,7 @@ fn enroll(state: &AppState, lane: Lane, full_name: &str, now: i64) -> Enrollment
                 tracked_since: date_utc(now),
                 state: BadgeState::Enrolled,
                 spark: Vec::new(),
+                axis: None,
             })
         }
         Ok(None) => Enrollment::Nothing,
@@ -1639,6 +1728,98 @@ mod tests {
             pill.body
         );
         assert_eq!(h.calls(), 0);
+    }
+
+    /// The long-form style: one URL away from the card, drawing everything
+    /// measured instead of the last 30 days (ticket 028).
+    #[test]
+    fn the_history_style_draws_the_whole_series_in_a_square() {
+        let h = harness(vec![]);
+        h.track(1, "o/r", 24 * 30, None);
+        for (ago, stars) in [
+            (96, 1_000),
+            (72, 1_400),
+            (48, 1_950),
+            (24, 2_600),
+            (1, 3_400),
+        ] {
+            h.snapshot(1, ago, stars);
+        }
+
+        let got = h.get("/badge/o/r?style=history");
+        assert_eq!(got.status, StatusCode::OK);
+        assert_eq!(got.content_type, "image/svg+xml; charset=utf-8");
+        assert_eq!(got.cache_control, "public, max-age=3600");
+        assert!(
+            got.body.contains(r#"width="420" height="516""#),
+            "{}",
+            got.body
+        );
+        // x runs first reading to last, so the line spans the square corner to
+        // corner, and the two ends are labelled with the dates they are.
+        assert!(
+            got.body.contains(r#"<polyline points="16,466"#),
+            "{}",
+            got.body
+        );
+        assert!(got.body.contains(r#" 404,86""#), "{}", got.body);
+        assert!(
+            got.body
+                .contains(&format!(">{}<", date_utc(h.now - 96 * HOUR))),
+            "{}",
+            got.body
+        );
+        assert!(
+            got.body.contains(&format!(">{}<", date_utc(h.now - HOUR))),
+            "{}",
+            got.body
+        );
+        assert!(got.body.contains(">4 days measured<"), "{}", got.body);
+
+        // The header is the card's, down to the velocity the card prints.
+        let card = h.get("/badge/o/r?style=card");
+        assert!(
+            card.body.contains(r#"width="420" height="150""#),
+            "{}",
+            card.body
+        );
+        for line in ["▲ 835/day", "top 100% velocity · all tracked repos"] {
+            assert!(got.body.contains(line), "{line}: {}", got.body);
+            assert!(card.body.contains(line), "{line}: {}", card.body);
+        }
+        assert!(card.body.contains("last 30 days"), "{}", card.body);
+
+        // Dark is the card's dark, and an untracked repo keeps the box.
+        assert!(
+            h.get("/badge/o/r?style=history&theme=dark")
+                .body
+                .contains("#0d1117")
+        );
+        let none = h.get("/badge/ghost/ship?style=history");
+        assert!(
+            none.body.contains(r#"width="420" height="516""#),
+            "{}",
+            none.body
+        );
+        assert!(none.body.contains("not tracked"), "{}", none.body);
+        assert!(!none.body.contains("polyline"), "{}", none.body);
+
+        // A repo measured inside one UTC day has a velocity but no second point
+        // to draw it between: the square shows the honest void, at its own size.
+        let day = date_utc(h.now - 2 * 24 * HOUR);
+        h.track(2, "o/oneday", 24 * 30, None);
+        h.snapshot_at(2, &format!("{day}T00:10:00Z"), 500);
+        h.snapshot_at(2, &format!("{day}T23:50:00Z"), 700);
+        let thin = h.get("/badge/o/oneday?style=history");
+        assert!(
+            thin.body.contains(r#"width="420" height="516""#),
+            "{}",
+            thin.body
+        );
+        assert!(thin.body.contains("▲ 203/day"), "{}", thin.body);
+        assert!(!thin.body.contains("polyline"), "{}", thin.body);
+        assert!(thin.body.contains("stroke-dasharray"), "{}", thin.body);
+        assert!(!thin.body.contains("measured<"), "{}", thin.body);
     }
 
     #[test]
