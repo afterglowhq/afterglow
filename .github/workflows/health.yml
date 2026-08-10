@@ -34,4 +34,5 @@ jobs:
         env:
           NTFY_URL: ${{ secrets.NTFY_URL }}
           RUN_ID: ${{ github.run_id }}
-        run: curl -s -d "afterglow.watch health probe failed: https://github.com/afterglowhq/afterglow/actions/runs/$RUN_ID" "$NTFY_URL"
+        run: |
+          curl -s -d "afterglow.watch health probe failed: https://github.com/afterglowhq/afterglow/actions/runs/$RUN_ID" "$NTFY_URL"
