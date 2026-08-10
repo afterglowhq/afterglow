@@ -1,0 +1,37 @@
+name: Health
+
+# The server alerts when a unit fails, but a dead box takes its alerting
+# down with it, so this watches from the outside instead.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+    - cron: "45 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: edge serves the site
+        run: curl -sf --retry 2 --max-time 20 -o /dev/null https://afterglow.watch/
+
+      - name: origin serves a badge
+        run: curl -sf --retry 2 --max-time 20 -o /dev/null "https://afterglow.watch/badge/afterglowhq/afterglow?probe=$(date +%s)"
+
+      - name: snapshots are fresh
+        if: github.event.schedule == '45 6 * * *'
+        run: |
+          # yesterday passes too: staleness timing can skip a repo for one
+          # sweep, two silent days is the real signal
+          svg=$(curl -sf --retry 2 --max-time 20 "https://afterglow.watch/badge/afterglowhq/afterglow?style=history&probe=$(date +%s)")
+          today=$(date -u +%F)
+          yesterday=$(date -u -d yesterday +%F)
+          echo "$svg" | grep -q ">$today<\|>$yesterday<"
+
+      - name: alert ops
+        if: failure()
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          RUN_ID: ${{ github.run_id }}
+        run: curl -s -d "afterglow.watch health probe failed: https://github.com/afterglowhq/afterglow/actions/runs/$RUN_ID" "$NTFY_URL"
