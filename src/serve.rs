@@ -1071,16 +1071,39 @@ fn spark_range(readings: &[Reading], now: i64) -> i64 {
     max - min
 }
 
+/// The board's shared vertical scale, from the on-board ranges.
+///
+/// Scaling every minispark to the single fastest mover flattens the rest of the
+/// board, because star velocity has a long tail: a repo pulling two thousand a
+/// day drew as a dead line under one pulling seven thousand. So the scale is the
+/// p90 of the ranges, not the max. The top tier pegs to full height, which no
+/// 16px line could rank anyway, and the pack below it gets its tilt back. A
+/// board too small to have a tail keeps scaling to its own max: nearest-rank
+/// p90 lands on the top row until there are more than about ten of them. p90 is
+/// a starting point, not a fixed law; lower it if the top of the board still
+/// reads too flat.
+fn board_scale(ranges: Vec<i64>) -> Option<i64> {
+    let mut ranges: Vec<i64> = ranges.into_iter().filter(|&r| r > 0).collect();
+    if ranges.is_empty() {
+        return None;
+    }
+    ranges.sort_unstable();
+    // ceil(0.9 * n), 1-based, so n <= 10 lands on the max and nothing changes.
+    let rank = (ranges.len() * 9).div_ceil(10);
+    Some(ranges[rank - 1])
+}
+
 /// A window of a series as points in a region. x is real time, so a young series
 /// in the card's fixed 30 days occupies only the right and the empty left is the
 /// whole point; the history square instead ends its window at the last reading,
 /// so the line spans it.
 ///
-/// `shared_range` is the largest 30-day movement on the board this series sits
-/// on: every row is drawn in that row's stars-per-pixel, so a steeper line is a
-/// faster repo, comparable row to row. A series drawn alone (the card) passes
-/// None and takes the whole region, because a lone spark has nothing to be
-/// comparable with and its magnitude is printed beside it.
+/// `shared_range` is the board's one 30-day scale (see `board_scale`): every row
+/// is drawn in those stars-per-pixel, so a steeper line is a faster repo,
+/// comparable row to row, and a row past the scale pegs to full height. A
+/// series drawn alone (the card) passes None and takes the whole region, because
+/// a lone spark has nothing to be comparable with and its magnitude is printed
+/// beside it.
 fn spark_points(
     readings: &[Reading],
     start: i64,
@@ -1190,15 +1213,18 @@ fn board(conn: &Connection, now: i64) -> Result<Board> {
         .map(|s| series_velocity(&s.readings))
         .collect();
     let fleet: Vec<i64> = measured.iter().flatten().copied().collect();
-    // The fastest mover sets one vertical scale for every minispark, so the
-    // angle of a row means the same thing as the angle of the row above it.
-    // Rows only: a sub-floor rocket the page never draws must not flatten it.
-    let shared_range = series
-        .iter()
-        .zip(&measured)
-        .filter(|(s, per_day)| per_day.is_some() && on_board(s))
-        .map(|(s, _)| spark_range(&s.readings, now))
-        .max();
+    // One vertical scale for every minispark, so the angle of a row means the
+    // same thing as the angle of the row above it. Rows only: a sub-floor rocket
+    // the page never draws must not flatten it, and neither must a single
+    // on-board one, which is why the scale is a percentile, not the max.
+    let shared_range = board_scale(
+        series
+            .iter()
+            .zip(&measured)
+            .filter(|(s, per_day)| per_day.is_some() && on_board(s))
+            .map(|(s, _)| spark_range(&s.readings, now))
+            .collect(),
+    );
 
     let mut through: Option<&str> = None;
     let mut rows: Vec<BoardRow> = Vec::new();
@@ -2961,6 +2987,47 @@ mod tests {
         assert_eq!(rise(&b.rows[0]), 16.0);
         assert_eq!(rise(&b.rows[1]), 1.6);
         assert_eq!(rise(&b.rows[2]), SPARK_MIN_RISE);
+        assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
+    fn board_scale_survives_one_runaway_repo() {
+        let h = harness(vec![]);
+        // An even pack and one repo pulling ten times the top of it. Scaled to
+        // that runaway's range every pack row collapses to the floor; the p90
+        // scale leaves the runaway pegged and the pack readable.
+        let base = 2000;
+        let pack = [
+            ("o/pack-1", 500),
+            ("o/pack-2", 1000),
+            ("o/pack-3", 1500),
+            ("o/mid", 2000),
+            ("o/pack-5", 2500),
+            ("o/pack-6", 3000),
+            ("o/pack-7", 3500),
+            ("o/pack-8", 4000),
+            ("o/pack-9", 4500),
+            ("o/rocket", 50_000),
+        ];
+        for (id, (name, range)) in (1..).zip(pack) {
+            h.track(id, name, 24 * 40, None);
+            h.snapshot(id, 48, base);
+            h.snapshot(id, 0, base + range);
+        }
+
+        let store = h.state.store();
+        let b = board(&store.conn, h.now).unwrap();
+        let rise = |name: &str| {
+            let row = b.rows.iter().find(|r| r.full_name == name).unwrap();
+            let ys = row.spark.iter().map(|&(_, y)| y);
+            let rise = ys.clone().fold(f64::MIN, f64::max) - ys.fold(f64::MAX, f64::min);
+            (rise * 10.0).round() / 10.0
+        };
+        // The runaway pegs to full height; the mid-pack repo a max-scale would
+        // have pinned to SPARK_MIN_RISE keeps a real tilt, 16 * 2000 / 4500.
+        assert_eq!(rise("o/rocket"), 16.0);
+        assert_eq!(rise("o/mid"), 7.1);
+        assert!(rise("o/mid") > SPARK_MIN_RISE);
         assert_eq!(h.calls(), 0);
     }
 }
