@@ -214,23 +214,25 @@ fn embed_markdown(slug: &str) -> String {
 
 /// The card embed: GitHub's own pattern for theme-aware images, one block that
 /// serves the dark cut to dark-mode readers and the light cut to everyone
-/// else, wrapped in the same link home as the pill snippet.
+/// else. No link around it: GitHub only keeps a raw HTML block when the line
+/// opens with a block tag, and `<a><picture>` parses as inline, which empties
+/// the picture and drops the dark source. The pill snippet carries the link home.
 fn card_picture(slug: &str) -> String {
     format!(
-        "<a href=\"{HOST}\"><picture>\n  \
+        "<picture>\n  \
          <source media=\"(prefers-color-scheme: dark)\" srcset=\"{HOST}/badge/{slug}?style=card&theme=dark\">\n  \
          <img alt=\"stars\" src=\"{HOST}/badge/{slug}?style=card\" width=\"420\" height=\"150\">\n\
-         </picture></a>"
+         </picture>"
     )
 }
 
 /// The history embed: the card's theme-aware block at the square's own size.
 fn history_picture(slug: &str) -> String {
     format!(
-        "<a href=\"{HOST}\"><picture>\n  \
+        "<picture>\n  \
          <source media=\"(prefers-color-scheme: dark)\" srcset=\"{HOST}/badge/{slug}?style=history&theme=dark\">\n  \
          <img alt=\"star history\" src=\"{HOST}/badge/{slug}?style=history\" width=\"420\" height=\"420\">\n\
-         </picture></a>"
+         </picture>"
     )
 }
 
