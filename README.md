@@ -22,6 +22,12 @@ If your README already has a badge style, match it by appending `?style=flat-squ
 
 [![stars](https://afterglow.watch/badge/afterglowhq/afterglow?style=flat-square)](https://afterglow.watch) [![stars](https://afterglow.watch/badge/afterglowhq/afterglow?style=for-the-badge)](https://afterglow.watch) [![stars](https://afterglow.watch/badge/afterglowhq/afterglow?style=social)](https://afterglow.watch)
 
+The highest day we ever measured, with its date. It only goes up:
+
+[![peak](https://afterglow.watch/badge/afterglowhq/afterglow?metric=peak)](https://afterglow.watch)
+
+    [![peak](https://afterglow.watch/badge/OWNER/REPO?metric=peak)](https://afterglow.watch)
+
 There is also the full chart. It answers the old star-history embed URLs (`/svg?repos=owner/name`), so replacing a dead chart is a one-hostname edit:
 
 <picture>

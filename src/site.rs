@@ -251,6 +251,11 @@ fn social_markdown(slug: &str) -> String {
     format!("[![stars]({HOST}/badge/{slug}?style=social)]({HOST})")
 }
 
+/// The peak embed: the pill's shape carrying the highest day instead of today's.
+fn peak_markdown(slug: &str) -> String {
+    format!("[![peak]({HOST}/badge/{slug}?metric=peak)]({HOST})")
+}
+
 /// The shields.io endpoint embed: shields' renderer fed by our numbers, the
 /// door to every other style and colour they draw.
 fn shields_markdown(slug: &str) -> String {
@@ -365,6 +370,15 @@ pub fn index(board: &Board) -> Markup {
                     img src=(format!("/badge/{name}?style=social"))
                         alt=(format!("afterglow social badge for {name}")) height="20";
                 }
+            }
+        }
+        p {
+            "The highest day we ever measured, with its date. It only goes up:"
+        }
+        (snippet(peak_markdown("OWNER/REPO")))
+        @if let Some(name) = example {
+            .examples {
+                img src=(format!("/badge/{name}?metric=peak")) alt=(format!("afterglow peak for {name}")) height="20";
             }
         }
         p {

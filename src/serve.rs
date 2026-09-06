@@ -536,7 +536,12 @@ async fn canonical_badge(
         Some("social") => Shape::Social,
         _ => Shape::Pill,
     };
-    render(state, &format!("{owner}/{repo}"), shape).await
+    // The card and the square draw velocity only, for now.
+    let metric = match shape {
+        Shape::Card(_) | Shape::History(_) => Metric::Velocity,
+        _ => metric_of(&q),
+    };
+    render(state, &format!("{owner}/{repo}"), shape, metric).await
 }
 
 /// star-history's embed shape, so migrating a dead chart is a one-hostname edit.
@@ -553,7 +558,7 @@ async fn compat_badge(
         .and_then(|repos| repos.split(',').map(str::trim).find(|r| !r.is_empty()))
         .unwrap_or_default()
         .to_string();
-    render(state, &first, Shape::Card(theme_of(&q))).await
+    render(state, &first, Shape::Card(theme_of(&q)), Metric::Velocity).await
 }
 
 /// shields.io's endpoint-badge schema: our numbers, their renderer. One URL and
@@ -563,12 +568,16 @@ async fn compat_badge(
 async fn shields_endpoint(
     State(state): State<Arc<AppState>>,
     Path((owner, repo)): Path<(String, String)>,
+    query: Result<Query<HashMap<String, String>>, QueryRejection>,
 ) -> Response {
     let name = format!("{owner}/{repo}");
+    let metric = metric_of(&query.map(|Query(q)| q).unwrap_or_default());
     let resolved = {
         let (state, name) = (Arc::clone(&state), name.clone());
-        tokio::task::spawn_blocking(move || resolve(&state, &name, now_unix(), Window::Recent))
-            .await
+        tokio::task::spawn_blocking(move || {
+            resolve(&state, &name, now_unix(), Window::Recent, metric)
+        })
+        .await
     };
     let badge = resolved.unwrap_or_else(|e| {
         eprintln!("badge {name}: {e}");
@@ -577,7 +586,12 @@ async fn shields_endpoint(
     let (label, message, color, max_age) = match &badge {
         Some(b) => {
             let (message, color, _aria) = badge::state_value(b);
-            (badge::commas(b.stars), message, color, max_age_for(b.state))
+            (
+                badge::commas(b.stars),
+                message,
+                color,
+                max_age_for(&b.state),
+            )
         }
         // The name is not echoed here: shields prints whatever we hand it, and
         // only our own renderer is trusted with a name that was typed at us.
@@ -604,6 +618,20 @@ async fn shields_endpoint(
     json_response(body.to_string(), max_age)
 }
 
+/// What number the badge prints: today's Δ/day, or the highest one it ever did.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Metric {
+    Velocity,
+    Peak,
+}
+
+fn metric_of(q: &HashMap<String, String>) -> Metric {
+    match q.get("metric").map(String::as_str) {
+        Some("peak") => Metric::Peak,
+        _ => Metric::Velocity,
+    }
+}
+
 fn theme_of(q: &HashMap<String, String>) -> Theme {
     match q.get("theme").map(String::as_str) {
         Some("dark") => Theme::Dark,
@@ -611,12 +639,13 @@ fn theme_of(q: &HashMap<String, String>) -> Theme {
     }
 }
 
-async fn render(state: Arc<AppState>, full_name: &str, shape: Shape) -> Response {
+async fn render(state: Arc<AppState>, full_name: &str, shape: Shape, metric: Metric) -> Response {
     let name = full_name.to_string();
     let resolved = {
         let (state, name) = (Arc::clone(&state), name.clone());
         let window = shape.window();
-        tokio::task::spawn_blocking(move || resolve(&state, &name, now_unix(), window)).await
+        tokio::task::spawn_blocking(move || resolve(&state, &name, now_unix(), window, metric))
+            .await
     };
     let badge = resolved.unwrap_or_else(|e| {
         // A panicking handler is a bug to fix, never a broken image in a README.
@@ -627,12 +656,12 @@ async fn render(state: Arc<AppState>, full_name: &str, shape: Shape) -> Response
     // the URL is whatever was typed at us, and only the untracked badge prints it.
     let shown = display_name(&name);
     let (svg, max_age) = match (&badge, shape) {
-        (Some(b), Shape::Pill) => (badge::pill(b), max_age_for(b.state)),
-        (Some(b), Shape::FlatSquare) => (badge::flat_square(b), max_age_for(b.state)),
-        (Some(b), Shape::ForTheBadge) => (badge::for_the_badge(b), max_age_for(b.state)),
-        (Some(b), Shape::Social) => (badge::social(b), max_age_for(b.state)),
-        (Some(b), Shape::Card(theme)) => (badge::card(b, theme), max_age_for(b.state)),
-        (Some(b), Shape::History(theme)) => (badge::history(b, theme), max_age_for(b.state)),
+        (Some(b), Shape::Pill) => (badge::pill(b), max_age_for(&b.state)),
+        (Some(b), Shape::FlatSquare) => (badge::flat_square(b), max_age_for(&b.state)),
+        (Some(b), Shape::ForTheBadge) => (badge::for_the_badge(b), max_age_for(&b.state)),
+        (Some(b), Shape::Social) => (badge::social(b), max_age_for(&b.state)),
+        (Some(b), Shape::Card(theme)) => (badge::card(b, theme), max_age_for(&b.state)),
+        (Some(b), Shape::History(theme)) => (badge::history(b, theme), max_age_for(&b.state)),
         (None, Shape::Pill) => (badge::not_tracked_pill(&shown), FRESH_MAX_AGE),
         (None, Shape::FlatSquare) => (badge::not_tracked_flat_square(&shown), FRESH_MAX_AGE),
         (None, Shape::ForTheBadge) => (badge::not_tracked_for_the_badge(&shown), FRESH_MAX_AGE),
@@ -668,7 +697,7 @@ fn display_name(full_name: &str) -> String {
     }
 }
 
-fn max_age_for(state: BadgeState) -> u32 {
+fn max_age_for(state: &BadgeState) -> u32 {
     match state {
         BadgeState::Enrolled => FRESH_MAX_AGE,
         _ => SETTLED_MAX_AGE,
@@ -773,7 +802,13 @@ struct Reading {
 }
 
 /// The badge for a repo, or `None` for anything untracked we could not enroll.
-fn resolve(state: &AppState, full_name: &str, now: i64, window: Window) -> Option<RepoBadge> {
+fn resolve(
+    state: &AppState,
+    full_name: &str,
+    now: i64,
+    window: Window,
+    metric: Metric,
+) -> Option<RepoBadge> {
     let (owner, name) = full_name.split_once('/')?;
     if !valid_owner(owner) || !valid_name(name) {
         // Junk reaches neither GitHub nor the store.
@@ -790,7 +825,7 @@ fn resolve(state: &AppState, full_name: &str, now: i64, window: Window) -> Optio
         Some(repo) if repo.status == Status::OptedOut => None,
         Some(repo) => {
             let store = state.store();
-            logged(full_name, build(&store.conn, &repo, now, window))?
+            logged(full_name, build(&store.conn, &repo, now, window, metric))?
         }
         None => match enroll(state, Lane::Embed, full_name, now) {
             Enrollment::Started(badge) => Some(badge),
@@ -829,21 +864,35 @@ fn find_repo(conn: &Connection, full_name: &str) -> Result<Option<Tracked>> {
         .optional()?)
 }
 
-fn build(conn: &Connection, repo: &Tracked, now: i64, window: Window) -> Result<Option<RepoBadge>> {
+fn build(
+    conn: &Connection,
+    repo: &Tracked,
+    now: i64,
+    window: Window,
+    metric: Metric,
+) -> Result<Option<RepoBadge>> {
     let latest = read_one(conn, LATEST_SNAPSHOT, params![repo.id])?;
     let stars = latest.as_ref().map_or(0, |r| r.stars);
     let measured = match &latest {
         Some(l) => velocity(conn, repo.id, l)?,
         None => None,
     };
+    let enrolled_today = repo.enrolled_at.get(..10) == Some(date_utc(now).as_str());
     let state = if repo.status != Status::Active {
         BadgeState::Paused
+    } else if enrolled_today && metric == Metric::Peak {
+        BadgeState::Enrolled
+    } else if metric == Metric::Peak {
+        match series_peak(&all_readings(conn, repo.id)?) {
+            Some((velocity, on)) => BadgeState::Peak { velocity, on },
+            None => BadgeState::NoPeak,
+        }
     } else if let Some(velocity) = measured {
         BadgeState::Measured {
             velocity,
             top_percent: percentile(conn, velocity, now)?,
         }
-    } else if repo.enrolled_at.get(..10) == Some(date_utc(now).as_str()) {
+    } else if enrolled_today {
         BadgeState::Enrolled
     } else if let Some(avg) = proxy_average(repo.created_at.as_deref(), stars, now) {
         BadgeState::Proxy { avg }
@@ -851,7 +900,7 @@ fn build(conn: &Connection, repo: &Tracked, now: i64, window: Window) -> Result<
         BadgeState::Measuring
     };
     // Glow is earned in either window: nothing but a measured repo draws a series.
-    let (spark, axis) = match (state, window) {
+    let (spark, axis) = match (&state, window) {
         (BadgeState::Measured { .. }, Window::Recent) => (spark(conn, repo.id, now)?, None),
         (BadgeState::Measured { .. }, Window::Lifetime) => match history(conn, repo.id)? {
             Some((points, axis)) => (points, Some(axis)),
@@ -987,6 +1036,37 @@ fn series_velocity(series: &[Reading]) -> Option<i64> {
     pair_velocity(latest, prior)
 }
 
+/// The highest Δ/day the card ever printed for this series, and the day it did.
+///
+/// Each reading is measured the way the card measures its latest one, against the
+/// newest reading at least `MIN_VELOCITY_SPAN_HOURS` behind it, so the peak is a
+/// number that was on a badge once. Nothing at or below zero is a peak, and an
+/// equal later day does not take it from the earlier one.
+fn series_peak(series: &[Reading]) -> Option<(i64, String)> {
+    let mut best: Option<(i64, String)> = None;
+    // Readings arrive in time order, so the cutoff and the prior only move forward.
+    let mut prior = 0;
+    for (i, latest) in series.iter().enumerate() {
+        let Some(at) = parse_iso8601_utc(&latest.ts) else {
+            continue;
+        };
+        let cutoff = iso8601_utc(at - MIN_VELOCITY_SPAN_HOURS * 3600);
+        while prior < i && series[prior].ts <= cutoff {
+            prior += 1;
+        }
+        if prior == 0 {
+            continue;
+        }
+        let Some(v) = pair_velocity(latest, &series[prior - 1]) else {
+            continue;
+        };
+        if v > 0 && best.as_ref().is_none_or(|(b, _)| v > *b) {
+            best = Some((v, latest.ts.get(..10).unwrap_or_default().to_string()));
+        }
+    }
+    best
+}
+
 /// The last 30 days as points in the card's spark region.
 fn spark(conn: &Connection, repo_id: i64, now: i64) -> Result<Vec<(f64, f64)>> {
     let start = now - SPARK_DAYS * SECONDS_PER_DAY;
@@ -1004,13 +1084,10 @@ fn spark(conn: &Connection, repo_id: i64, now: i64) -> Result<Vec<(f64, f64)>> {
 /// A drawn series and the two dates that scale it.
 type Square = (Vec<(f64, f64)>, badge::Axis);
 
-/// Everything measured, drawn in the square, with the two ends of it named.
-///
-/// The x-axis runs first reading to last rather than to now, so the line touches
-/// both edges and the dates under them are the dates of real readings.
-fn history(conn: &Connection, repo_id: i64) -> Result<Option<Square>> {
+/// One repo's whole series, oldest first.
+fn all_readings(conn: &Connection, repo_id: i64) -> Result<Vec<Reading>> {
     let mut stmt = conn.prepare(ALL_SNAPSHOTS)?;
-    let readings: Vec<Reading> = stmt
+    let readings = stmt
         .query_map(params![repo_id], |row| {
             Ok(Reading {
                 ts: row.get(0)?,
@@ -1018,6 +1095,15 @@ fn history(conn: &Connection, repo_id: i64) -> Result<Option<Square>> {
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
+    Ok(readings)
+}
+
+/// Everything measured, drawn in the square, with the two ends of it named.
+///
+/// The x-axis runs first reading to last rather than to now, so the line touches
+/// both edges and the dates under them are the dates of real readings.
+fn history(conn: &Connection, repo_id: i64) -> Result<Option<Square>> {
+    let readings = all_readings(conn, repo_id)?;
     let (Some(first), Some(last)) = (readings.first(), readings.last()) else {
         return Ok(None);
     };
@@ -1692,6 +1778,72 @@ mod tests {
     }
 
     #[test]
+    fn the_peak_metric_keeps_the_highest_day() {
+        let h = harness(vec![]);
+        h.track(1, "o/r", 24 * 30, None);
+        // Up 500 on the second day, then slower: today's badge says 50, the peak says 500.
+        for (ago, stars) in [(73, 1_000), (49, 1_500), (25, 1_600), (1, 1_650)] {
+            h.snapshot(1, ago, stars);
+        }
+        let on = iso8601_utc(h.now - 49 * HOUR)[..10].to_string();
+        let value = format!("▲ 500/day peak · {on}");
+        let aria = format!("afterglow: 1,650 stars, peak 500 per day on {on}");
+
+        let pill = h.get("/badge/o/r?metric=peak");
+        assert_eq!(pill.cache_control, "public, max-age=3600");
+        assert!(pill.body.contains(&value), "{}", pill.body);
+        assert!(pill.body.contains(&aria), "{}", pill.body);
+        assert!(pill.body.contains("#d4a72c"), "{}", pill.body);
+        assert!(!pill.body.contains("▲ 50/day"), "{}", pill.body);
+
+        let ftb = h.get("/badge/o/r?style=for-the-badge&metric=peak");
+        assert!(
+            ftb.body.contains(&format!("▲ 500/DAY PEAK · {on}")),
+            "{}",
+            ftb.body
+        );
+        for style in ["flat-square", "social"] {
+            let cut = h.get(&format!("/badge/o/r?style={style}&metric=peak"));
+            assert!(cut.body.contains(&value), "{style}: {}", cut.body);
+        }
+
+        let json: serde_json::Value =
+            serde_json::from_str(&h.get("/shields/o/r?metric=peak").body).expect("schema json");
+        assert_eq!(json["message"], value);
+        assert_eq!(json["color"], "#d4a72c");
+
+        // The card, the square, and the compat URL take the velocity metric only.
+        for uri in [
+            "/badge/o/r?style=card",
+            "/badge/o/r?style=history",
+            "/svg?repos=o/r&type=Date",
+        ] {
+            let with = h.get(&format!("{uri}&metric=peak"));
+            assert_eq!(with.body, h.get(uri).body, "{uri}");
+        }
+        // An unknown metric is the velocity pill.
+        assert_eq!(
+            h.get("/badge/o/r?metric=zenith").body,
+            h.get("/badge/o/r").body
+        );
+
+        // A repo that never gained wears the grey, in the words for that.
+        h.track(2, "o/flat", 24 * 30, None);
+        h.snapshot(2, 49, 1_000);
+        h.snapshot(2, 1, 1_000);
+        let flat = h.get("/badge/o/flat?metric=peak");
+        assert!(flat.body.contains("no peak yet"), "{}", flat.body);
+        assert!(
+            flat.body
+                .contains("afterglow: 1,000 stars, no measured peak yet"),
+            "{}",
+            flat.body
+        );
+        assert!(flat.body.contains("#9f9f9f"), "{}", flat.body);
+        assert_eq!(h.calls(), 0);
+    }
+
+    #[test]
     fn style_defaults_to_the_pill_and_theme_only_moves_the_card() {
         let h = harness(vec![]);
         measured(&h, 1, "o/r");
@@ -1736,6 +1888,17 @@ mod tests {
                 home.body
             );
         }
+        // The peak sits with the cuts: its snippet, then the top repo wearing it.
+        assert!(
+            home.body.contains("badge/OWNER/REPO?metric=peak"),
+            "no peak snippet: {}",
+            home.body
+        );
+        assert!(
+            home.body.contains(r#"src="/badge/o/r?metric=peak""#),
+            "no live peak: {}",
+            home.body
+        );
         // The two themed styles are offered the way a themed image has to be
         // asked for, so the page never hands out an embed that ignores the reader.
         for style in ["card", "history"] {
@@ -2877,6 +3040,36 @@ mod tests {
             pair_velocity(&r("yesterday", 1), &r("2026-07-30T00:00:00Z", 0)),
             None
         );
+    }
+
+    #[test]
+    fn series_peak_is_the_highest_day_the_card_printed() {
+        let day = |d: i64, stars| Reading {
+            ts: iso8601_utc(d * 24 * HOUR),
+            stars,
+        };
+        // Up 500, then 100, then 50: the middle day is the peak, and stays it.
+        let series = [day(1, 1_000), day(2, 1_500), day(3, 1_600), day(4, 1_650)];
+        assert_eq!(series_peak(&series), Some((500, "1970-01-03".to_string())));
+        // Flat or falling never peaks.
+        assert_eq!(series_peak(&[day(1, 1_000), day(2, 1_000)]), None);
+        assert_eq!(series_peak(&[day(1, 1_000), day(2, 900)]), None);
+        // One reading, or two too close together, is not a measurement.
+        assert_eq!(series_peak(&[day(1, 1_000)]), None);
+        let close = [
+            Reading {
+                ts: iso8601_utc(0),
+                stars: 1_000,
+            },
+            Reading {
+                ts: iso8601_utc(6 * HOUR),
+                stars: 1_100,
+            },
+        ];
+        assert_eq!(series_peak(&close), None);
+        // Two equal maxima: the earlier day keeps the peak.
+        let twice = [day(1, 1_000), day(2, 1_200), day(3, 1_400), day(4, 1_400)];
+        assert_eq!(series_peak(&twice), Some((200, "1970-01-03".to_string())));
     }
 
     #[test]

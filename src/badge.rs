@@ -55,12 +55,19 @@ pub struct Axis {
     pub days: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BadgeState {
     Measured {
         velocity: i64,
         top_percent: f64,
     },
+    /// The highest Δ/day the card ever printed, and the day it did (`?metric=peak`).
+    Peak {
+        velocity: i64,
+        on: String,
+    },
+    /// The peak metric before any reading gained: too few readings, or none up.
+    NoPeak,
     /// Young repo, lifetime average until a measured delta exists.
     Proxy {
         avg: i64,
@@ -129,6 +136,20 @@ pub fn state_value(b: &RepoBadge) -> (String, &'static str, String) {
             delta(velocity),
             AMBER,
             format!("afterglow: {count} stars, {}", gain_phrase(velocity)),
+        ),
+        BadgeState::Peak { velocity, ref on } => (
+            format!("{} peak · {}", delta(velocity), xml_escape(on)),
+            AMBER,
+            format!(
+                "afterglow: {count} stars, peak {} per day on {}",
+                commas(velocity),
+                xml_escape(on)
+            ),
+        ),
+        BadgeState::NoPeak => (
+            "no peak yet".to_string(),
+            PROXY_GREY,
+            format!("afterglow: {count} stars, no measured peak yet"),
         ),
         BadgeState::Proxy { avg } => (
             proxy_avg(avg),
@@ -343,6 +364,10 @@ fn card_parts(b: &RepoBadge, t: &Palette, f: &Frame) -> CardParts {
             spark: dashed(f, t),
             footer: footer_el(&format!("tracked since {since}"), "400", f.footer_y, t),
         },
+        // `canonical_badge` hands the card and the square the velocity metric only.
+        BadgeState::Peak { .. } | BadgeState::NoPeak => {
+            unreachable!("the card draws velocity, not the peak")
+        }
     }
 }
 
