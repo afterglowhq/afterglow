@@ -138,7 +138,7 @@ pub fn state_value(b: &RepoBadge) -> (String, &'static str, String) {
             format!("afterglow: {count} stars, {}", gain_phrase(velocity)),
         ),
         BadgeState::Peak { velocity, ref on } => (
-            format!("{} peak · {}", delta(velocity), xml_escape(on)),
+            format!("{} peak", delta(velocity)),
             AMBER,
             format!(
                 "afterglow: {count} stars, peak {} per day on {}",

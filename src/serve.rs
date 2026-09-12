@@ -1786,7 +1786,7 @@ mod tests {
             h.snapshot(1, ago, stars);
         }
         let on = iso8601_utc(h.now - 49 * HOUR)[..10].to_string();
-        let value = format!("▲ 500/day peak · {on}");
+        let value = "▲ 500/day peak".to_string();
         let aria = format!("afterglow: 1,650 stars, peak 500 per day on {on}");
 
         let pill = h.get("/badge/o/r?metric=peak");
@@ -1797,11 +1797,7 @@ mod tests {
         assert!(!pill.body.contains("▲ 50/day"), "{}", pill.body);
 
         let ftb = h.get("/badge/o/r?style=for-the-badge&metric=peak");
-        assert!(
-            ftb.body.contains(&format!("▲ 500/DAY PEAK · {on}")),
-            "{}",
-            ftb.body
-        );
+        assert!(ftb.body.contains("▲ 500/DAY PEAK"), "{}", ftb.body);
         for style in ["flat-square", "social"] {
             let cut = h.get(&format!("/badge/o/r?style={style}&metric=peak"));
             assert!(cut.body.contains(&value), "{style}: {}", cut.body);
