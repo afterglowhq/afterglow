@@ -2303,10 +2303,15 @@ mod tests {
             );
         }
 
-        // The moat claim, in the wording the spec pins it to.
+        // The moat claim is gone: GitHub restored star history on 4 September
+        // 2026, and the page says so, with the changelog linked.
         let index = h.get("/").body;
         assert!(
-            index.contains("only comprehensive, cross-ecosystem accumulating series"),
+            index.contains("closes the gap this project existed to cover"),
+            "{index}"
+        );
+        assert!(
+            index.contains("2026-09-04-new-api-endpoint-provides-privacy-safe-star-history-data"),
             "{index}"
         );
         assert!(index.contains(r#"action="/enroll""#), "{index}");

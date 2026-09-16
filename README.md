@@ -2,9 +2,13 @@
 
 [![stars](https://afterglow.watch/badge/afterglowhq/afterglow)](https://afterglow.watch)
 
-GitHub stopped exposing star history on June 30, 2026. The lists died; only the current counts survive.
-Afterglow is a snapshot fleet that has been recording those counts daily since July 30, 2026.
-A missed day can never be recovered, so the dataset itself is the point: measured star velocity, honest fidelity labels, and a badge that drops into the hole the dead chart embeds left behind.
+GitHub restricted stargazer lists on June 30, 2026, and star history went with them.
+Afterglow is a snapshot fleet that has been recording the public counts daily since July 30, 2026, so the record would not have a hole in it.
+On September 4, 2026, GitHub shipped a [star history endpoint](https://github.blog/changelog/2026-09-04-new-api-endpoint-provides-privacy-safe-star-history-data/) that returns daily counts back to the day a repo was created, and the hole is closed.
+
+The site stays up and the badges keep working: measured star velocity, honest fidelity labels, and a leaderboard.
+The fleet keeps reading and no reading is ever deleted, but for history itself GitHub's own data now reaches further back than ours.
+If you swapped a star-history embed for one of ours, the swap back is the same one-hostname edit in reverse.
 
 Live at [afterglow.watch](https://afterglow.watch).
 
@@ -28,7 +32,7 @@ The highest day we ever measured, with its date. It only goes up:
 
     [![peak](https://afterglow.watch/badge/OWNER/REPO?metric=peak)](https://afterglow.watch)
 
-There is also the full chart. It answers the old star-history embed URLs (`/svg?repos=owner/name`), so replacing a dead chart is a one-hostname edit:
+There is also the full chart. It answers star-history's embed URLs (`/svg?repos=owner/name`), so a README can swap hostnames either way and change nothing else:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://afterglow.watch/svg?repos=afterglowhq/afterglow&type=Date&theme=dark">
@@ -54,7 +58,7 @@ That chart is a 30-day window. For the whole series, `?style=history` draws it a
       <img alt="star history" src="https://afterglow.watch/badge/OWNER/REPO?style=history" width="420" height="420">
     </picture>
 
-It starts at the day we first read your repo, which is the earliest point anyone still has.
+It starts at the day we first read your repo, not the day the repo did.
 The numbers across the top are the card's, so the two never disagree.
 
 The pill and its cuts above are theme-invariant on purpose, so they stay plain markdown.

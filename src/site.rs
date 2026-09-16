@@ -17,6 +17,8 @@ use crate::serve::{
 const HOST: &str = "https://afterglow.watch";
 const CONTACT: &str = "hello@afterglow.watch";
 const SOURCE_REPO: &str = "https://github.com/afterglowhq/afterglow";
+const STAR_HISTORY_ENDPOINT_URL: &str =
+    "https://github.blog/changelog/2026-09-04-new-api-endpoint-provides-privacy-safe-star-history-data/";
 const DESCRIPTION: &str = "Daily star snapshots for GitHub repos: a README badge with measured velocity, \
      and a public leaderboard.";
 
@@ -291,13 +293,16 @@ pub fn index(board: &Board) -> Markup {
         h2 { "What this is" }
         p {
             "GitHub restricted stargazer lists on 30 June 2026, and star history went with them. "
-            "Aggregate counts are still public, so those are what we snapshot, daily, and a "
+            "Aggregate counts stayed public, so those are what we snapshot, daily, and a "
             "snapshot is never deleted."
         }
         p {
-            "History cannot be backfilled. Nobody can go back and observe what a star count was "
-            "last Tuesday, which is what makes this the only comprehensive, cross-ecosystem "
-            "accumulating series, and makes every tracked day a day nobody can catch up on."
+            "On 4 September 2026 GitHub added a "
+            a href=(STAR_HISTORY_ENDPOINT_URL) { "star history endpoint" }
+            " that returns daily counts back to the day a repo was created, with no token. "
+            "That closes the gap this project existed to cover. The badges and the leaderboard "
+            "keep working and the fleet keeps reading, but for history itself GitHub's own "
+            "data now reaches further back than ours."
         }
         p {
             "Every number here carries its fidelity. A measured velocity comes from two readings "
@@ -437,8 +442,8 @@ pub fn index(board: &Board) -> Markup {
         }
         (snippet(shields_markdown("OWNER/REPO")))
         p {
-            "If your README still points at the dead star-history embed, edit the hostname and "
-            "change nothing else:"
+            "The chart answers star-history's embed URLs, so a README can swap hostnames "
+            "either way and change nothing else:"
         }
         pre { code { (HOST) "/svg?repos=" (slug) "&type=Date" } }
         p {
